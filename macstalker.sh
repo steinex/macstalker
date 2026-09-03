@@ -51,7 +51,7 @@ scan_mac() {
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
-    token=$(echo "$response" | grep -oP '(?<="token":")[^"]*')
+    token=$(echo "$response" | ggrep -oP '(?<="token":")[^"]*')
 
     curl -s -o /dev/null \
       -H "User-Agent: $UA" \
@@ -59,7 +59,7 @@ scan_mac() {
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=stb&action=get_profile&auth_second_step=1&hw_version_2=1635b1c3e68859923ab3bb72192e089f66e7dd9e&JsHttpRequest=1-xml"
 
-    if ! echo "$response" | grep -q "200"; then
+    if ! echo "$response" | ggrep -q "200"; then
       echo -ne "scanning: $MAC ${RED}[connection failed, ratelimited?]${RESET}\r"
       continue
     fi
