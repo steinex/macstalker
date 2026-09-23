@@ -42,7 +42,7 @@ scan_mac() {
     read current_count < "$success_file"
     ((current_count >= max_success_count)) && break
 
-    prefixes=("00:1A:79" "00:26:AB" "BC:F6:85")
+    prefixes=("00:1A:79" "00:1A:79" "00:1A:79")
     prefix="${prefixes[RANDOM%3]}"
     MAC="${prefix}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
     echo -ne "scanning: $MAC\r"
@@ -51,7 +51,7 @@ scan_mac() {
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
-    token=$(echo "$response" | ggrep -oP '(?<="token":")[^"]*')
+    token=$(echo "$response" | grep -oP '(?<="token":")[^"]*')
 
     curl -s -o /dev/null \
       -H "User-Agent: $UA" \
@@ -59,7 +59,7 @@ scan_mac() {
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=stb&action=get_profile&auth_second_step=1&hw_version_2=1635b1c3e68859923ab3bb72192e089f66e7dd9e&JsHttpRequest=1-xml"
 
-    if ! echo "$response" | ggrep -q "200"; then
+    if ! echo "$response" | grep -q "200"; then
       echo -ne "scanning: $MAC ${RED}[connection failed, ratelimited?]${RESET}\r"
       continue
     fi
