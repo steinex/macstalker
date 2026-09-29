@@ -13,6 +13,13 @@ YELLOW="\033[0;33m"
 LIGHT_BLUE="\033[0;94m"
 RESET="\033[0m"
 
+# Choose grep implementation: ggrep on macOS, grep elsewhere
+if [[ "$(uname)" == "Darwin" ]]; then
+    GREP="ggrep"
+else
+    GREP="grep"
+fi
+
 echo -ne "Checking portal connectivity... "
 http_code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 10 \
   -H "User-Agent: $UA" \
@@ -51,7 +58,7 @@ scan_mac() {
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
-    token=$(echo "$response" | grep -oP '(?<="token":")[^"]*')
+    token=$(echo "$response" | $GREP -oP '(?<="token":")[^"]*')
 
     curl -s -o /dev/null \
       -H "User-Agent: $UA" \
@@ -59,7 +66,7 @@ scan_mac() {
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=stb&action=get_profile&auth_second_step=1&hw_version_2=1635b1c3e68859923ab3bb72192e089f66e7dd9e&JsHttpRequest=1-xml"
 
-    if ! echo "$response" | grep -q "200"; then
+    if ! echo "$response" | $GREP -q "200"; then
       echo -ne "scanning: $MAC ${RED}[connection failed, ratelimited?]${RESET}\r"
       continue
     fi
