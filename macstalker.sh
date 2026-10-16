@@ -34,7 +34,7 @@ fi
 printf '%sOK (HTTP %s)%s\n' "$GREEN" "$http_code" "$RESET"
 
 read -rp "${YELLOW}How many MACs do you want to find? ${RESET}" max_success_count
-read -rp "${YELLOW}Parallel workers? [10]${RESET}" num_workers
+read -rp "${YELLOW}Parallel workers? [10] ${RESET}" num_workers
 num_workers=${num_workers:-10}
 
 success_file=$(mktemp)
