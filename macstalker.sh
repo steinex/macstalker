@@ -62,7 +62,6 @@ scan_mac() {
     prefixes=("00:1A:79" "00:1A:79" "00:1A:79")
     prefix="${prefixes[RANDOM%3]}"
     MAC="${prefix}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
-    progress "scanning: $MAC"
 
     response=$(curl -s -i \
       -H "User-Agent: $UA" \
