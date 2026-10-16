@@ -21,6 +21,8 @@ else
     GREP="grep"
 fi
 
+UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 4 rev: 2721 Mobile Safari/533.3"
+
 printf 'Checking portal connectivity... '
 http_code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 10 \
   -H "User-Agent: $UA" \
@@ -42,7 +44,6 @@ echo "0" > "$success_file"
 hit_file=$(mktemp)
 
 
-UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 4 rev: 2721 Mobile Safari/533.3"
 hex=(0 1 2 3 4 5 6 7 8 9 A B C D E F)
 
 # Serialized in-place line update: CR + clear-line + message, locked so
