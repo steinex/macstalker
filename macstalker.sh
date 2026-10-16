@@ -59,9 +59,7 @@ scan_mac() {
     read -r current_count < "$success_file"
     ((current_count >= max_success_count)) && break
 
-    prefixes=("00:1A:79" "00:1A:79" "00:1A:79")
-    prefix="${prefixes[RANDOM%3]}"
-    MAC="${prefix}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
+    MAC="00:1A:79:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
 
     response=$(curl -s -i \
       -H "User-Agent: $UA" \
