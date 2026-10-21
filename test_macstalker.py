@@ -10,6 +10,7 @@ These tests run without touching the network or the real ``nordvpn`` CLI:
 """
 
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -29,13 +30,24 @@ def make_rotator(countries=("DE", "NL", "FR"), requests_per_ip=None):
 
 
 class BeginRequestTests(unittest.TestCase):
-    def test_returns_false_until_threshold(self):
+    """``begin_request`` is a *barrier* for a single NordVPN tunnel.
+
+    It blocks until the current source IP's budget has a free slot, then takes
+    that slot and returns ``None`` (workers ignore the value). The observable
+    effects are the per-IP counter and, once ``requests_per_ip`` requests have
+    been taken, a rotation to a fresh IP on the next call. That guarantees we
+    never fire past the WAF ceiling onto an already-burning IP.
+    """
+
+    def test_rotates_once_budget_exhausted(self):
         r = make_rotator(requests_per_ip=3)
         with mock.patch.object(macstalker, "rotate_nordvpn", return_value="ip1"):
-            self.assertFalse(r.begin_request())  # 1/3
-            self.assertFalse(r.begin_request())  # 2/3
-            self.assertTrue(r.begin_request())   # 3/3 -> rotates
-        self.assertEqual(r.rotations, 1)
+            r.begin_request()          # 1/3
+            r.begin_request()          # 2/3
+            r.begin_request()          # 3/3 -> budget now full
+            self.assertEqual(r.rotations, 0)
+            r.begin_request()          # budget full -> rotate, take fresh slot
+            self.assertEqual(r.rotations, 1)
         self.assertEqual(r.current, "ip1")
 
     def test_counter_resets_after_rotation(self):
@@ -43,9 +55,11 @@ class BeginRequestTests(unittest.TestCase):
         with mock.patch.object(macstalker, "rotate_nordvpn",
                                side_effect=["ipA", "ipB"]):
             r.begin_request()          # 1/2
-            self.assertTrue(r.begin_request())   # 2/2 -> rotate -> ipA
-            self.assertFalse(r.begin_request())  # counter reset, 1/2
-            self.assertTrue(r.begin_request())   # 2/2 -> rotate -> ipB
+            r.begin_request()          # 2/2 -> budget full
+            r.begin_request()          # full -> rotate ipA, counter reset -> 1/2
+            self.assertEqual(r.rotations, 1)
+            r.begin_request()          # 2/2 -> budget full
+            r.begin_request()          # full -> rotate ipB, counter reset -> 1/2
         self.assertEqual(r.rotations, 2)
         self.assertEqual(r.current, "ipB")
 
@@ -54,7 +68,7 @@ class BeginRequestTests(unittest.TestCase):
         with mock.patch.object(macstalker, "rotate_nordvpn"):
             # Without a budget, begin_request never proactively rotates.
             for _ in range(50):
-                self.assertFalse(r.begin_request())
+                r.begin_request()
         self.assertEqual(r.rotations, 0)
 
 
@@ -85,6 +99,74 @@ class ReportBlockedTests(unittest.TestCase):
             self.assertFalse(r._dirty)
             self.assertFalse(r.begin_request())  # nothing pending now
         self.assertEqual(r.rotations, 1)
+
+
+class BarrierConcurrencyTests(unittest.TestCase):
+    """Workers parked on the rotation barrier wake the instant a rotation
+    bumps the generation (no busy-polling, no lost wakeups)."""
+
+    def test_parked_workers_wake_on_rotation(self):
+        r = make_rotator(requests_per_ip=1)
+        with mock.patch.object(macstalker, "rotate_nordvpn", return_value="ip1"):
+            r.begin_request()            # take the only slot on gen 0
+            with r._cv:
+                r._dirty = True          # simulate a rotation in flight
+            results = []
+            worker = lambda: results.append(r.begin_request())
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            time.sleep(0.1)              # let them all park on the barrier
+            self.assertEqual(results, [])
+            r.rotate()                   # bump generation -> wake everyone
+            for t in threads:
+                t.join(timeout=2)
+        self.assertEqual(len(results), 4)
+
+    def test_concurrent_callers_never_overshoot_budget(self):
+        """No more than requests_per_ip slots are ever handed out per
+        generation, no matter how the threads interleave."""
+        r = make_rotator(requests_per_ip=3)
+        with mock.patch.object(macstalker, "rotate_nordvpn", return_value="ip1"):
+            errors = []
+
+            def worker():
+                try:
+                    for _ in range(5):
+                        r.begin_request()
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+        self.assertEqual(errors, [])
+        # A generation yields exactly `requests_per_ip` slots, and a rotation
+        # is only ever triggered by an exhausted budget, so the slot math is
+        # exact: 20 calls = 6 rotations + 3 + 3 + 3 + 3 + 3 + 2.
+        self.assertEqual(r.rotations, 6)
+        self.assertEqual(r._used_this_ip, 2)
+
+
+class PortalGatingTests(unittest.TestCase):
+    """Every portal request consumes exactly one per-IP budget slot."""
+
+    def test_action_consumes_budget(self):
+        r = make_rotator(requests_per_ip=3)
+        p = macstalker.Portal("http://x", rotator=r)
+        ok = mock.Mock(status_code=200, text="{}")
+        with mock.patch.object(p, "_get", return_value=ok):
+            for _ in range(3):
+                p.action("00:1A:79:AA:00:01", "get_all_channels")
+        self.assertEqual(r._used_this_ip, 3)
+
+    def test_no_rotator_no_gating(self):
+        p = macstalker.Portal("http://x", rotator=None)
+        ok = mock.Mock(status_code=200, text="{}")
+        with mock.patch.object(p, "_get", return_value=ok):
+            p.action("00:1A:79:AA:00:01", "get_all_channels")
 
 
 class RoundRobinTests(unittest.TestCase):
