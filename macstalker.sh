@@ -15,7 +15,7 @@ RESET=$'\033[0m'
 CLEAR_LINE=$'\033[2K'
 
 UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 4 rev: 2721 Mobile Safari/533.3"
-# 0.1s per-request timeout: a blocked/ratelimited (WAF) IP is detected as fast
+# 1s per-request timeout: a blocked/ratelimited (WAF) IP is detected as fast
 # as possible — curl returns 000 on timeout — so we can hop to a fresh VPN
 # server without stalling the workers.
 SCAN_TIMEOUT=1

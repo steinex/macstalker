@@ -69,7 +69,7 @@ Summary (sorted by total content):
 
 ## Options / behavior
 
-- Requests use a very low per-request timeout (`SCAN_TIMEOUT=2`, editable at the top of the script) so blocked or ratelimited IPs fail fast instead of stalling workers.
+- Requests use a very low per-request timeout (`SCAN_TIMEOUT=1`, editable at the top of the script) so blocked or ratelimited IPs fail fast instead of stalling workers.
 - Accounts that connect but have no subscriptions (no "All" genre) are skipped automatically.
 
 ## NordVPN

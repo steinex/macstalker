@@ -241,7 +241,8 @@ class Rotator:
         if country and country not in self.countries:
             self.countries.insert(0, country)
         self._idx = 0
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()          # guards the shared counters/flags
+        self._rotate_lock = threading.Lock()   # serializes blocking rotations
         self._used_this_ip = 0
         self.rotations = 0
         self.current = None
@@ -259,59 +260,65 @@ class Rotator:
             self.current = self._rotate() or "<unknown>"
 
     def _next_country(self):
-        c = self.countries[self._idx % len(self.countries)]
-        self._idx += 1
+        with self._lock:
+            c = self.countries[self._idx % len(self.countries)]
+            self._idx += 1
         return c
 
-    def rotate(self):
-        """Force a rotation now (call under no lock; takes the lock itself)."""
-        with self._lock:
-            return self._rotate()
-
     def _rotate(self):
-        # Caller must hold self._lock.
-        self.rotations += 1
-        country = self._next_country()
-        new_ip = rotate_nordvpn(country)
-        self.current = new_ip or "<unknown>"
-        self._used_this_ip = 0
-        self._dirty = False
+        """Perform one blocking rotation.
+
+        The nordvpn reconnect is slow, so it is serialized behind _rotate_lock
+        (two threads never issue competing disconnects) while the shared state
+        lock is only held for the short bookkeeping updates — never across the
+        blocking call — so the other workers keep making progress.
+        """
+        with self._rotate_lock:
+            country = self._next_country()
+            new_ip = rotate_nordvpn(country)
+            with self._lock:
+                self.current = new_ip or "<unknown>"
+                self._used_this_ip = 0
+                self._dirty = False
+                self.rotations += 1
+        return self.current
+
+    def rotate(self):
+        """Force a rotation now."""
+        self._rotate()
         return self.current
 
     # -- request bookkeeping ----------------------------------------------
     def begin_request(self):
-        """Called before a request; returns True if the caller must wait for a
-        proactive rotation to finish first (rotation already performed)."""
-        if self.requests_per_ip is not None:
-            with self._lock:
-                self._used_this_ip += 1
-                if self._used_this_ip >= self.requests_per_ip:
-                    self._dirty = True
-                    log.info("reached %d requests on this IP -> proactive rotation",
-                             self.requests_per_ip)
-                    return True
-        if self._dirty:
-            # A previous block already queued a rotation; perform it now.
-            with self._lock:
-                if self._dirty:
-                    self._rotate()
-                    return True
-        return False
-
-    def report_ok(self):
+        """Called before a request. Proactively rotates (blocking) once the
+        per-IP request budget is exhausted, or when a rotation is already
+        pending from a previous block. Returns True if a rotation was done."""
         with self._lock:
-            self._used_this_ip += 0  # no-op; counter handled in begin_request
-            # ok response: nothing to do (clears nothing; counter resets on rotate)
-            pass
+            if self.requests_per_ip is not None:
+                self._used_this_ip += 1
+                threshold_hit = self._used_this_ip >= self.requests_per_ip
+            else:
+                threshold_hit = False
+            needed = self._dirty or threshold_hit
+            if not needed:
+                return False
+            if threshold_hit:
+                log.info("reached %d requests on this IP -> proactive rotation",
+                         self.requests_per_ip)
+        # Rotation happens outside the fast lock so workers don't stall.
+        self._rotate()
+        return True
 
     def report_blocked(self):
-        """Mark that a block was observed; schedule a rotation."""
+        """A block was observed: rotate now. Only the first reporter in a
+        burst actually rotates; the rest are no-ops."""
         with self._lock:
-            if not self._dirty:
-                log.warning("block detected -> rotating IP")
-                self._rotate()
-            else:
-                self._dirty = False
+            needed = not self._dirty
+            if needed:
+                self._dirty = True
+        if needed:
+            log.warning("block detected -> rotating IP")
+            self._rotate()
 
 
 # ---------------------------------------------------------------------------
@@ -579,24 +586,6 @@ class Scanner:
         self._retry = {}
         self._retry_lock = threading.Lock()
 
-    def max_found(self):
-        a = self.args
-        if a.macs:
-            return len(a.macs)
-        if a.macs_file:
-            # count non-blank, non-comment lines
-            n = 0
-            try:
-                with open(a.macs_file) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            n += 1
-            except Exception:
-                n = a.count
-            return n
-        return a.count
-
     def should_stop(self):
         return self._stop.is_set() or self._reached_max_found()
 
@@ -621,9 +610,6 @@ class Scanner:
             # and let the caller decide to re-queue a bounded number of times.
             if verdict == "BLOCKED":
                 return "BLOCKED"
-            self.rotator.report_ok()
-        else:
-            self.rotator.report_ok()
 
         if self.args.delay > 0:
             time.sleep(self.args.delay)
