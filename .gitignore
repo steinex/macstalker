@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+
+# AiderDesk local state
+.aider-desk/
+.aider.input.history
