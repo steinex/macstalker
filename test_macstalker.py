@@ -104,7 +104,7 @@ class SerializationTests(unittest.TestCase):
         max_active = 0
         lock = threading.Lock()
 
-        def fake_rotate(country):
+        def fake_rotate(country, avoid_ip=None):
             nonlocal active, max_active
             with lock:
                 active += 1

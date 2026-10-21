@@ -4,3 +4,7 @@ __pycache__/
 # AiderDesk local state
 .aider-desk/
 .aider.input.history
+
+# scanner runtime artifacts
+scan.state
+registered.json
