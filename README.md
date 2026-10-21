@@ -22,6 +22,7 @@ Workers run in parallel and stop once the requested number of MACs has been foun
 - `curl`
 - `jq`
 - `flock` (util-linux — needed for the progress line locking)
+- `nordvpn` CLI (installed via **nordvpn-gui**) — required, all traffic goes through it
 
 ## Usage
 
@@ -42,9 +43,9 @@ How many MACs do you want to find?   (stop after N valid MACs)
 Parallel workers? [10]               (default: 10)
 ```
 
-> **Note:** The portal rate-limits by IP. If your IP gets blocked the scanner will
-> show `connection failed, ratelimited?` for a while — keep the worker count
-> moderate and give it time.
+> **Note:** The portal rate-limits by IP. When your source IP gets blocked the
+> scanner shows `connection failed, ratelimited?` and **automatically hops to a
+> fresh NordVPN server** (any region) to get a new source IP — see below.
 
 ## Output
 
@@ -70,3 +71,20 @@ Summary (sorted by total content):
 
 - Requests use a very low per-request timeout (`SCAN_TIMEOUT=2`, editable at the top of the script) so blocked or ratelimited IPs fail fast instead of stalling workers.
 - Accounts that connect but have no subscriptions (no "All" genre) are skipped automatically.
+
+## NordVPN
+
+All traffic runs through an active NordVPN tunnel — the scanner **never scans
+without a VPN connection**:
+
+- Before any workers start, `ensure_vpn` makes sure a tunnel is up (connecting
+  to a server if needed).
+- Whenever a handshake comes back blocked / ratelimited (non-200), the worker
+  triggers a hop to a **different** NordVPN server (any region) so the next MACs
+  are sent from a fresh source IP.
+- The hop is **transparent**: it happens mid-scan, prints a single
+  `blocked → new VPN: <country>` status line and immediately resumes scanning.
+
+A switch happens **immediately** on every block — no waiting, no de-bouncing.
+Hops are only **serialized** across workers (only one `nordvpn connect` runs at
+a time) so parallel workers don't stack connections on each other.
