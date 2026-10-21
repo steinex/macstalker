@@ -84,6 +84,10 @@ without a VPN connection**:
   are sent from a fresh source IP.
 - The hop is **transparent**: it happens mid-scan, prints a single
   `blocked → new VPN: <country>` status line and immediately resumes scanning.
+- **Blocked MACs are not lost** — a MAC whose handshake failed on the current
+  endpoint is parked in a retry queue and retried as soon as a fresh VPN
+  endpoint is up, so a geo-blocked MAC gets a fair second chance on a new IP
+  before the scanner moves on to brand-new random MACs.
 
 A switch happens **immediately** on every block — no waiting, no de-bouncing.
 Hops are only **serialized** across workers (only one `nordvpn connect` runs at

