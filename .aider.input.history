@@ -1,0 +1,69 @@
+
+# 2026-10-22T00:07:25.938Z
++You are an experienced software engineer. Modify the existing program from this conversation so it has a graphical user interface (GUI) and can load proxy lists from a .txt file. The result must retain the program’s existing functionality and behavior; do not redesign or remove features unless required to integrate the GUI.
++
++## Instructions
++1. First inspect the existing code and identify its language, framework, current behavior, inputs, outputs, and dependencies. Treat the existing implementation as the source of truth for what “exactly the same program” means.
++2. If the original program or function is not available in the conversation, do not invent its behavior or produce a guessed replacement. Ask the user to paste or attach the original code, and state briefly what information is needed.
++3. If the code is available, implement the GUI in the same language and use a compatible GUI framework already present in the project where practical. If no GUI framework is already used, choose a simple, widely supported option appropriate to the existing language and explain that choice.
++4. Add a GUI control that lets the user select a `.txt` file containing a proxy list. Read the file safely and pass its valid proxies into the existing program’s proxy-related functionality. Preserve the existing program’s processing logic.
++5. Support common proxy-line formats where they are compatible with the existing program, including `host:port`, `host:port:username:password`, and `username:password@host:port`. Do not silently reinterpret ambiguous lines. If the existing program expects a different format, prioritize that format and document it.
++6. Ignore blank lines and whitespace around entries. Detect malformed entries, duplicates, and unreadable or empty files. Show useful feedback in the GUI, including how many proxies were loaded and which lines were rejected, without exposing passwords unnecessarily.
++7. Keep the interface straightforward. Include a file-selection control, a visible selected-file path or filename, a clear action to start the existing operation, and a status/result area. Disable actions when required input is missing or invalid. Do not freeze the interface during long-running work; use the appropriate background-task pattern for the chosen framework and safely report completion or errors.
++8. Preserve existing non-GUI entry points or command-line behavior if the project has them. Avoid unrelated refactoring and do not add unnecessary dependencies.
++
++## Constraints
++- Do not replace the existing program’s core logic with a mock, pseudocode, or a simplified implementation.
++- Do not fabricate expected outputs or claim that code was executed if it was not.
++- Keep credentials and proxy details out of logs and error messages unless absolutely necessary for debugging.
++- Use clear names, appropriate error handling, and comments only where they improve maintainability.
++
++## Required output
++Provide:
++1. A concise summary of the changes and any assumptions.
++2. The complete modified source code, not just a diff or selected snippets. If the project requires multiple files, show each file with its path and complete contents.
++3. Any dependency or installation changes.
++4. Exact instructions to run the GUI.
++5. A brief verification checklist covering normal file loading, malformed lines, empty/unreadable files, starting the existing operation, and errors or completion during processing.
++
++## Verification rules
++Before presenting the solution, check that the code is internally consistent, imports and event handlers match the chosen framework, the TXT parser feeds the existing logic in the expected format, and the original behavior remains intact. If you cannot verify something without running the project, say so explicitly and provide the relevant manual test instead.
+
+# 2026-10-22T00:11:33.091Z
++You are a careful coding assistant. Build the simplest practical graphical user interface for the existing proxy-scanning program provided in this conversation or available in the workspace.
++
++## Context and goal
++The GUI must run on Fedora and let the user select a `.txt` file containing proxies, then start the existing program’s scan. Preserve the program’s actual behavior and use its existing proxy format, scanning logic, and results wherever possible. Do not replace the scanner with a newly invented implementation.
++
++## Instructions
++1. Inspect the available source code and determine its language, dependencies, input format, scan interface, and result handling before making changes.
++2. Add a minimal, clear GUI around that program. Prefer the least-complex approach compatible with the existing code; use Python’s Tkinter if it fits the project and is available or straightforward to install on Fedora.
++3. Include, at minimum:
++   - A button to choose a `.txt` proxy file and a visible display of the selected file.
++   - A button to start scanning, disabled when no valid file is selected or a scan is already running.
++   - Clear progress or status feedback while scanning.
++   - A readable display of scan results and useful error messages.
++   - Responsive GUI behavior: run long scans without freezing the window, and safely update the interface from the worker thread or process.
++4. Reuse existing functions or command-line entry points when possible. Keep code changes focused on the GUI and any small integration adjustments necessary. Do not silently change scan semantics, proxy parsing, timeouts, or concurrency settings.
++5. Make reasonable Fedora-specific choices. Explain any required system packages or Python dependencies, and provide exact commands to install dependencies and launch the application.
++6. Handle common problems clearly, including an unreadable or empty file, malformed input as handled by the existing program, scan failures, and attempts to close the window during a scan.
++7. Do not claim to have tested the application unless you actually ran it. If execution or testing is unavailable, say so and identify what should be tested.
++
++## Constraints
++- Keep the interface and setup as simple as possible.
++- Do not invent missing source code, APIs, formats, or scan behavior.
++- Do not add unrelated features or rewrite the project unnecessarily.
++- Assume the user intends to scan proxies they are authorized to test; do not add stealth, evasion, or unauthorized-access capabilities.
++- If the existing program is not present in the conversation or workspace, do not guess how it works. Ask the user to provide the source files or paste the program, and briefly state which files or entry point are needed.
++
++## Verification
++Before presenting code, check that the proposed GUI calls the real scanner correctly, handles file selection and scan errors, avoids freezing the UI during a scan, and includes Fedora-appropriate run instructions. Keep any assumptions explicit.
++
++## Required output
++If the source is available, provide:
++1. A brief summary of the integration approach.
++2. The complete contents of every new or changed file, with each filename clearly identified.
++3. Fedora installation and launch commands.
++4. A short note on assumptions and testing performed or still needed.
++
++If the source is unavailable, respond only with a concise request for the program or project files needed to build the GUI; do not provide fabricated code.

@@ -3,8 +3,18 @@
 URL="${1%/}"
 
 if [ -z "$URL" ]; then
-    echo "Usage: $0 <portal-url>"
+    echo "Usage: $0 <portal-url> [proxy-file.txt]"
+    echo "  proxy-file.txt: optional, accepted for the GUI; this scanner"
+    echo "                  itself does not use proxies."
     exit 1
+fi
+
+# Optional proxy list (e.g. chosen by the GUI). The scanner generates and
+# tests MACs directly; the file is only checked to exist so the GUI gets a
+# clear error instead of silently running without it.
+PROXY_FILE="${2:-}"
+if [ -n "$PROXY_FILE" ]; then
+  [ -f "$PROXY_FILE" ] || { echo "proxy file not readable: $PROXY_FILE"; exit 1; }
 fi
 
 GREEN=$'\033[0;32m'
@@ -30,12 +40,13 @@ hit_file=$(mktemp)
 
 hex=(0 1 2 3 4 5 6 7 8 9 A B C D E F)
 
-# Serialized in-place line update: CR + clear-line + message, locked so
-# concurrent workers can't interleave ESC sequences mid-line.
+# Progress events: one plain, locked line per attempt, so the terminal and
+# the GUI (macstalker_gui.py parses the "PROGRESS|" prefix) share the same
+# stream without interleaved ESC sequences.
 progress() {
   {
     flock -x 200
-    printf '\r%s%s' "$CLEAR_LINE" "$1"
+    printf 'PROGRESS|%s\n' "$1"
   } 200>"$success_file.lock"
 }
 
@@ -123,12 +134,15 @@ scan_mac() {
       "$URL/portal.php?type=series&action=get_ordered_list&category=*&sortby=added&fav=0&p=1&JsHttpRequest=1-xml" \
       | jq -r 'try (.js.total_items // .js[0].total_items) // 0' 2>/dev/null)
 
+    # Progress event first (plain line, parsed by the GUI), then the found
+    # details under the same lock the hit_file/count update already used.
+    progress "found: $mac_phone  Live:$live VOD:$vod Series:$series"
     {
       flock -x 200
-      printf '\r%sfound:    %s%s%s\n' "$CLEAR_LINE" "$GREEN" "$mac_phone" "$RESET"
+      printf 'FOUND|%s|%s\n' "$MAC" "$mac_phone"
       [ -n "$exp_date" ] && [ "$exp_date" != "null" ] && \
-        printf '%s  -> %s/get.php?username=%s&password=%s&type=m3u_plus [max=%s active=%s]%s\n' \
-          "$LIGHT_BLUE" "$URL" "$xtreamuser" "$xtreampw" "$max_connections" "$active_cons" "$RESET"
+        printf 'FOUND|-> %s/get.php?username=%s&password=%s&type=m3u_plus [max=%s active=%s]\n' \
+          "$URL" "$xtreamuser" "$xtreampw" "$max_connections" "$active_cons"
       printf "%s|%s|%s|%s\n" "$MAC" "$live" "$vod" "$series" >> "$hit_file"
       # Increment under the lock: a read-modify-write outside the lock
       # loses increments when two workers race on the same value.
@@ -149,11 +163,12 @@ for ((i=0; i<num_workers; i++)); do
 done
 
 show_summary() {
-  printf '\r%s' "$CLEAR_LINE"
+  # Plain "SUMMARY|"-prefixed lines (was ANSI in-place output) so the GUI
+  # can show the sorted hit list without parsing escape sequences.
   if [ -s "$hit_file" ]; then
-    printf '\n%sSummary (sorted by total content):%s\n' "$LIGHT_BLUE" "$RESET"
+    printf 'SUMMARY|Summary (sorted by total content):\n'
     awk -F'|' '{print $2+$3+$4, $0}' "$hit_file" | sort -rn | cut -d' ' -f2- | while IFS='|' read -r mac live vod series; do
-      printf '%s  %s%s%s  Live TV: %s  VOD: %s  Series: %s%s\n' "$LIGHT_BLUE" "$GREEN" "$mac" "$LIGHT_BLUE" "$live" "$vod" "$series" "$RESET"
+      printf 'SUMMARY|  %s  Live TV: %s  VOD: %s  Series: %s\n' "$mac" "$live" "$vod" "$series"
     done
   fi
   rm -f "$success_file" "$success_file.lock" "$hit_file"
