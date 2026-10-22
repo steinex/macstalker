@@ -1,24 +1,24 @@
 {
-  "initialUserPrompt": "Build the simplest practical GUI (Tkinter, Fedora) around the existing macstalker.sh scanner: select a .txt proxy file, start scan, live status, results, non-freezing UI, reuse existing scan logic.",
+  "initialUserPrompt": "Ergänze die GUI um eine einfache Portal-URL-Prüfung (erreichbar/Status/Redirect/Zeit) ohne UI-Freeze, konservative Einzelanfrage.",
   "items": [
     {
-      "name": "Inspect macstalker.sh, deps, and input interface",
+      "name": "Re-verify current macstalker_gui.py state and conventions",
       "completed": true
     },
     {
-      "name": "Add minimal machine-readable event output to macstalker.sh (+ PROXY_FILE arg)",
+      "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
       "completed": true
     },
     {
-      "name": "Write macstalker_gui.py Tkinter wrapper (file picker, scan, thread-safe updates)",
+      "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
       "completed": true
     },
     {
-      "name": "Verify: bash -n, py_compile, and an actual headless run of the modified script",
+      "name": "Present patch, run/test instructions, assumptions (German)",
       "completed": true
     },
     {
-      "name": "Write integration summary, Fedora install/launch commands, assumptions & test notes",
+      "name": "Store memory of URL-check integration",
       "completed": true
     }
   ]

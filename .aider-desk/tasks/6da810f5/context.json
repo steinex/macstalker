@@ -1259,6 +1259,1387 @@
         "id": "e8b0066b-54eb-457b-8acd-d5b8ee0ac308"
       },
       "timestamp": 1792630109446
+    },
+    {
+      "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c",
+      "role": "user",
+      "content": "Modify the GUI in the code or project files provided in this conversation so a user can easily check a portal URL such as `http://line.tvdsz.cc/c`.\n\nInstructions:\n- First inspect the available project files and identify the GUI framework, existing structure, and conventions. Preserve the current framework, design, and unrelated behavior wherever practical.\n- Add a straightforward interface for entering one portal URL and starting a check. Show a clear result, such as reachable/unreachable, HTTP status code when available, response time, and any redirect destination. Include understandable error messages and prevent the interface from freezing while the request runs.\n- Treat this as a basic availability check of the exact URL entered by the user—not a vulnerability assessment or a broad scan. Make only a normal, low-impact request to that URL. Do not crawl links, enumerate paths, guess credentials, bypass authentication, evade restrictions, or send repeated/high-volume requests. Do not submit credentials or sensitive data.\n- Validate the URL and handle timeouts, DNS/network errors, invalid input, and unexpected responses gracefully. Keep any timeout and request behavior conservative, and explain relevant assumptions.\n- Make the smallest complete change that fits the existing application. Do not replace the project with an unrelated demo or invent files, APIs, or dependencies that are not needed.\n\nVerification:\n- Review the changes for compatibility with the existing project and likely runtime errors.\n- If the environment allows, run relevant tests or a build and report the results honestly. Do not claim that code was tested if it was not.\n\nResponse requirements:\n- Respond in German.\n- If project code is available, provide the implementation as a concise patch or the complete contents of each changed file, with filenames. Include any necessary run or test instructions.\n- If no source code or project files are available in the conversation, do not fabricate a rewrite. Briefly ask the user to provide the relevant GUI source files and identify the language or framework if it is not apparent.\n- State clearly that the feature checks only the user-entered URL and requires authorization to test the target.",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636595741
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Task: Add a portal URL check feature to the existing GUI (macstalker_gui.py, Tkinter). Project is at /home/admin/Dokumente/git-jan/macstalkergui/macstalker/.\n\nPlan:\n- Inspect current files (already known).\n- Add a \"Portal check\" section to the GUI: enter a URL (the existing Portal URL entry can be reused, but a separate check button is better). Simplest: add a \"Prüfen\" (check) button next to the URL field, run a single HTTP request in a thread (urllib.request), with timeout (e.g., 5 seconds), report status, response time, and redirect location.\n\nDesign decisions:\n- Use urllib (standard library, no new dependencies). Single GET request to the entered URL. Note: the scanner's handshake is at /portal.php, but the requirement states a basic availability check against the exact URL entered — GET to the exact URL, with a short timeout (e.g., 5 seconds). Follow redirects? \"Show the redirect destination if any\" — if the redirect is followed, report the final URL, and/or show Location if it's a redirect. urllib follows redirects by default; report the final URL, and if it differs from the input, show it. Use a UA similar to the scanner? Keep it simple: plain GET with User-Agent.\n- Run in a worker thread, update UI via the existing queue/poll mechanism (reuse the queue, but check events must not conflict with scan state). Simplest: either have a separate thread that posts to the same queue, or just use a small queue. Reuse the existing queue with event kinds (\"check_result\", ...). The queue is drained by poll_queue, so add handling for these kinds.\n- Disable the check button while a check is running, to prevent repeated requests.\n- Error handling: no URL / invalid scheme → message; URLError with reason; timeout; HTTPError → still a status code (200-599 are \"reachable\", with code); non-HTTP errors (connection refused, DNS) → unreachable.\n- Conservative: single GET, timeout 5 seconds, no retries.\n\nPlacement: add a check button \"Prüfen\" next to the Portal URL entry, and display results in the log + a small result label? Show a result label next to the button, and also write to the log. Keep the UI in English? The app's UI text is currently English; the response to the user is in German, but code comments/UI — preserve existing conventions (English UI). Hmm, existing GUI text is English. Preserve English UI text, respond in German.\n\nImplementation details:\n\nIn `_scan_worker`... no, add the following:\n\n```python\nimport urllib.request\nimport urllib.error\nimport socket\n\ndef _check_url(self):\n    url = self.url_entry.get().strip()\n    # validation: http/https, has netloc\n    try:\n        parts = urllib.parse.urlsplit(url)\n    except ValueError:\n        ...\n    if parts.scheme not in (\"http\", \"https\") or not parts.netloc:\n        log error\n        return\n    if self.checking: return\n    self.checking = True\n    self.check_button.config(state=\"disabled\")\n    threading.Thread(target=self._url_check_worker, args=(url,), daemon=True).start()\n\ndef _url_check_worker(self, url):\n    start = time.monotonic()\n    try:\n        req = urllib.request.Request(url, headers={\"User-Agent\": UA...})\n        with urllib.request.urlopen(req, timeout=5) as resp:\n            status = resp.status\n            final_url = resp.geturl()\n            elapsed = ...\n            self.queue.put((\"check_done\", ok, details...))\n    except urllib.error.HTTPError as e:\n        status code e.code -> reachable with status\n    except urllib.error.URLError as e:\n        reason; if socket.timeout -> timeout\n    except Exception as e:\n```\n\nSimpler: worker computes a result string + ok flag and puts (\"check\", (ok, text)). Main thread re-enables the button and shows the text in the log and in the status/result label.\n\nRedirect: urllib follows redirects; if final_url differs from the input url, include \"→ redirected to: final_url\".\n\nNote: http://line.tvdsz.cc/c — a GET to the exact URL. Stalker portals might return a redirect to a login page; no problem.\n\nAlso, don't send cookies/credentials; urllib doesn't. Low-impact: single request.\n\nAdd a check button + result label on row 2 (parameters row). But the row is already crowded (URL, MACs, Workers). Better: add a \"Portal check\" row: button + result label. Actually the URL entry is on row 2. Add a dedicated small row between the file row and the parameters row? Simpler: add a \"Prüfe URL\" button on row 2 next to the URL entry... space is tight (window 820px). Add a new row: \"Portal check: [Check button] [result label]\". The result label shows status/time/redirect.\n\nQueue handling: in poll_queue, item[0] == \"check\" → handle. But items are (kind, text) tuples, with check = (\"check\", (ok, text)). No problem.\n\nAlso need a guard: disable check while a scan is running? Not strictly necessary — it's a separate request. But to keep it simple, allow it; use a separate thread. Keep independence.\n\nAlso, on window close, if a check is running: the thread is a daemon; queue.put guard uses _destroyed — the check worker's put happens after urlopen; if the window has been destroyed, _destroyed becomes True → skip. Use a put() helper like _scan_worker.\n\nTimeout: 5 seconds (conservative). Scanner uses 2s for internal requests, but the check is user-initiated; 5s is reasonable and conservative. Note it in the comment.\n\nValidation details:\n- Strip whitespace.\n- Parse with urllib.parse.urlsplit; catch ValueError (\"Invalid IP address\" etc.).\n- Scheme must be http/https, netloc required; port must be valid (urlsplit validates).\n- Empty → error message.\n\nResult display: log line + result label. Status label? Use a dedicated result label to avoid overwriting the scan status.\n\nResult text format (UI stays English, consistent with existing):\n- OK: `OK — HTTP 200 in 0.34 s (final: <url>)` if redirected: `OK — HTTP 200 in 0.34 s, redirected to: <final>`\n- HTTPError: `HTTP error: status 404 (reachable, server responded)` — tag \"error\" but reachable.\n- URLError timeout: `Timed out after 5 s (no response)`\n- URLError reason: `Unreachable: <reason>` (e.g., [Errno 111] Connection refused, [Errno -3] DNS)\n- socket.gaierror handled as a URLError reason.\n\nTag colors: ok → \"found\"? Maybe add a tag \"check\" green. Reuse: ok → \"found\" (green), error → \"error\".\n\nAdd UI to `_build_ui` after the params row? Order: file row, parameters row, then a check row before the Start/Stop row? Actually the check belongs near the URL. Insert a new row right after the params frame:\n\n```python\n        check = ttk.Frame(self.root)\n        check.pack(fill=\"x\")\n        check.pack_configure(**pad)\n        self.check_button = ttk.Button(check, text=\"Check portal URL\", command=self.on_check_url)\n        self.check_button.pack(side=\"left\")\n        self.check_label = ttk.Label(check, text=\"\")\n        self.check_label.pack(side=\"left\", padx=(12, 0))\n```\n\nButton: \"Check portal URL\" (checks the URL in the Portal URL field). Label the row: maybe \"Check portal URL:\" — button + result label is fine.\n\nWorker:\n\n```python\n    # ---------- portal URL check ----------\n\n    def on_check_url(self):\n        if self.checking:\n            return\n        url = self.url_entry.get().strip()\n        try:\n            parts = urllib.parse.urlsplit(url)\n        except ValueError:\n            parts = None\n        if not url or parts is None or parts.scheme not in (\"http\", \"https\") or not parts.netloc:\n            self.log_line(\"Enter a valid portal URL, e.g. http://example.com\", \"error\")\n            self.check_label.config(text=\"\", foreground=\"\")\n            return\n        self.checking = True\n        self.check_button.config(state=\"disabled\")\n        self.log_line(f\"Checking URL: {url} (single request, 5 s timeout)…\", \"info\")\n        threading.Thread(target=self._url_check_worker, args=(url,), daemon=True).start()\n\n    def _url_check_worker(self, url):\n        # One plain GET to the exact URL (no retries, no cookie/credentials),\n        # so the check stays a low-impact availability probe.\n        start = time.monotonic()\n        ok, text = False, \"\"\n        try:\n            with urllib.request.urlopen(url, timeout=CHECK_TIMEOUT,\n                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"}) as resp:\n                ok = True\n                text = f\"HTTP {resp.status} in {time.monotonic() - start:.2f} s\"\n                if resp.geturl() != url:\n                    text += f\" — redirected to {resp.geturl()}\"\n        except urllib.error.HTTPError as exc:\n            text = f\"Server responded, but HTTP {exc.code} in {time.monotonic() - start:.2f} s\"\n        except urllib.error.URLError as exc:\n            text = (f\"Timed out after {CHECK_TIMEOUT} s\" if isinstance(exc.reason, socket.timeout)\n                    else f\"Unreachable ({exc.reason})\")\n        except Exception as exc:  # e.g. invalid URL details\n            text = f\"Check failed: {exc}\"\n        self.queue.put((\"check_done\", (ok, text)))\n```\n\nHmm, socket.timeout: in py3.10+, URLError wraps the timeout... actually, for a connection timeout, urlopen raises URLError(reason=TimeoutError or socket.timeout). `socket.timeout` is an alias for TimeoutError since 3.10. Check with `isinstance(exc.reason, (socket.timeout,))` — socket.timeout exists. No problem.\n\nHandling in poll:\n\n```python\n    def _handle_event(self, item):\n        kind, text = item\n        if kind == \"progress\":\n            ...\n        elif kind == \"check_done\":\n            ok, message = text\n            self.checking = False\n            self.check_button.config(state=\"normal\")\n            self.check_label.config(text=message, foreground=\"\" if ok else \"#e06c75\")\n            self.log_line((\"Portal check OK: \" if ok else \"Portal check failed: \") + message, \"found\" if ok else \"error\")\n        else:\n            ...\n```\n\nWait, kind is the first element, and text is the second. In the check case, text is the tuple (ok, message). OK.\n\nImports: `import socket`, `import time`, `import urllib.error`, `import urllib.parse`, `import urllib.request`.\n\nSet the initial state of check_button in `_build_ui`: `self.check_button.config(state=...)` — the check button should be enabled regardless of file selection (independent). Always enabled except while checking.\n\nAlso, the `_destroyed` guard: put() uses raw self.queue.put — check worker: use the same helper? _scan_worker defines put locally. In the check worker, guard with `if not self._destroyed:` before put. Minor point.\n\nEdge case: user closes window while a check is running: daemon thread, put guarded.\n\nAlso, disable check during a scan? Not necessary.\n\nTest: run headless with a fake HTTP server on :8080 to check a local URL → HTTP 200; check an unreachable URL → error; also against the fake portal? Simply: spin up http.server, run the GUI on display :0, call on_check_url with http://127.0.0.1:PORT, wait, assert log. Also test invalid URL, empty entry, timeout (using a closed port or a port with no listener → connection refused, fast).\n\nTimeout test: use a port where nothing listens → fast refusal. True timeout is hard without a blackhole; use 127.0.0.1 with a port that has no listener → ECONNREFUSED. Good enough.\n\nAlso, HTTPError test: request a path that 404s on http.server → 404 → text \"HTTP 404\".\n\nWrite the code with minimal edits:\n\n1. Add imports: socket, time, urllib.error, urllib.parse, urllib.request.\n2. Constant CHECK_TIMEOUT = 5.\n3. Add UI row in _build_ui after the params row.\n4. Add methods on_check_url, _url_check_worker.\n5. Extend poll_queue/_handle_event for \"check_done\".\n6. init: self.checking = False.\n\nWhere to insert the UI row — after the params row, before the Start/Stop row. Actually logically: check row right after the file row? The URL is on the parameters row. Place the check row after params (before buttons). No problem.\n\nAlso update the docstring? The docstring says \"Run: python3 macstalker_gui.py\". Maybe add a one-liner about the URL check. Optional; keep minimal. Update the docstring to mention it? The requirement says keep minimal; a one-liner in the docstring is fine but not required. Skip to keep the diff small. Actually a short note would help; skip.\n\nAlso note: the existing GUI log uses tags; reuse.\n\nNow write the edits, run py_compile, and run a headless test on display :0 with a local HTTP server.\n\nTest script:\n```python\nimport http.server, threading, time, tkinter as tk, macstalker_gui, queue as q\n# start server\nsrv = http.server.HTTPServer((\"127.0.0.1\", 0), http.server.SimpleHTTPRequestHandler)\nport = srv.server_address[1]\nthreading.Thread(target=srv.serve_forever, daemon=True).start()\nroot = tk.Tk(); app = macstalker_gui.MacstalkerApp(root)\napp.url_entry.delete(0,\"end\"); app.url_entry.insert(0, f\"http://127.0.0.1:{port}/\")\napp.on_check_url()\n# wait for check_done\ndeadline = time.time()+8\nwhile app.checking and time.time() < deadline:\n    root.update(); time.sleep(0.05)\nassert not app.checking\nprint(\"label:\", app.check_label.cget(\"text\"))\n# 404\napp.url_entry.delete(0,\"end\"); app.url_entry.insert(0, f\"http://127.0.0.1:{port}/nope.html\")\napp.on_check_url()\nwhile app.checking and time.time() < deadline: root.update(); time.sleep(0.05)\nprint(\"404 label:\", app.check_label.cget(\"text\"))\n# invalid\napp.url_entry.delete(0,\"end\"); app.url_entry.insert(0, \"not a url\")\napp.on_check_url()\nassert app.checking is False\nprint(\"invalid handled\")\n# connection refused\napp.url_entry.delete(0,\"end\"); app.url_entry.insert(0, \"http://127.0.0.1:1/\")\napp.on_check_url()\nwhile app.checking and time.time() < deadline: root.update(); time.sleep(0.05)\nprint(\"refused label:\", app.check_label.cget(\"text\"))\napp.on_close()\nprint(\"CHECK TESTS OK\")\n```\n\nNote: on_check_url uses the current thread's url_entry; no problem.\n\nOne concern: `resp.status` — for http.server's HTTP/1.0 responses, status works. Redirect test: hard without a redirect handler; skip or use a custom handler that redirects. Add a small redirect handler test: class H(http.server.BaseHTTPRequestHandler) that sends 302 to /b for path /a. Include in the test.\n\nAlso, check that the GUI doesn't freeze: the check runs in a thread; root.update() is called — sufficient for a headless test.\n\nAlso note: SimpleHTTPRequestHandler for \"/\" serves a directory listing (200). No problem.\n\nLet's implement.\n\nAlso: check button label wording: \"Check portal URL\". Result label empty in initial state.\n\nAlso, if the user clicks check while a scan is running: it works independently; no problem.\n\nEdge: urlsplit(\"not a url\") → scheme '' → caught. \"http://\" → netloc is empty → caught. \"http://[::1\" invalid → ValueError → caught.\n\nPort validation: urlsplit handles \"http://x:99999\" → ValueError(\"Port out of range\") in py3.9+? Yes, ValueError. Good.\n\nNow let's write the edits.\n\nEdit 1 — imports:\n```python\nimport os\nimport queue\nimport re\nimport signal\nimport subprocess\nimport threading\nimport tkinter as tk\nimport tkinter.ttk as ttk\nfrom tkinter import filedialog\n```\n→ add socket, time, urllib.* — alphabetical order: os, queue, re, signal, socket, subprocess, threading, time, tkinter..., then urllib lines. Preserve style.\n\nEdit 2 — constant after ANSI_RE? Near the top after SCRIPT:\n```python\nCHECK_TIMEOUT = 5  # seconds, one-shot portal availability check\n```\n\nEdit 3 — add self.checking = False in __init__.\n\nEdit 4 — UI row after the params block (after `self.workers_entry.pack(side=\"left\", padx=6)`):\n```python\n\n        # Row 2b: one-shot portal URL check (plain GET, no scan)\n        check_row = ttk.Frame(self.root)\n        check_row.pack(fill=\"x\")\n        check_row.pack_configure(**pad)\n        self.check_button = ttk.Button(check_row, text=\"Check portal URL\",\n                                        command=self.on_check_url)\n        self.check_button.pack(side=\"left\")\n        self.check_label = ttk.Label(check_row, text=\"(not checked yet)\", foreground=\"#555\")\n        self.check_label.pack(side=\"left\", padx=(12, 0))\n```\n\nEdit 5 — methods before `# ---------- main loop plumbing ----------`... place after the on_stop block. Add a new section \"---------- portal URL check ----------\".\n\nEdit 6 — extend _handle_event.\n\nCurrent _handle_event:\n```python\n    def _handle_event(self, item):\n        kind, text = item\n        if kind == \"progress\":\n            self.status_label.config(text=f\"{self.mac_count} found — {text}\")\n        else:\n            self.log_line(text, kind)\n            if kind == \"found\":\n                self.status_label.config(text=f\"{self.mac_count} found\")\n```\n→\n```python\n    def _handle_event(self, item):\n        kind, text = item\n        if kind == \"progress\":\n            self.status_label.config(text=f\"{self.mac_count} found — {text}\")\n        elif kind == \"check_done\":\n            self._handle_check_done(text)\n        else:\n            self.log_line(text, kind)\n            if kind == \"found\":\n                self.status_label.config(text=f\"{self.mac_count} found\")\n\n    def _handle_check_done(self, result):\n        ok, message = result\n        self.checking = False\n        self.check_button.config(state=\"normal\")\n        self.check_label.config(text=message, foreground=\"\" if ok else \"#e06c75\")\n        self.log_line((\"Portal check OK: \" if ok else \"Portal check failed: \") + message,\n                      \"found\" if ok else \"error\")\n```\n\nWorker method:\n\n```python\n    # ---------- portal URL check ----------\n\n    def on_check_url(self):\n        # Validates and starts a single, low-impact GET to the exact URL\n        # entered in \"Portal URL\" (no crawl, no retries, no credentials).\n        if self.checking:\n            return\n        url = self.url_entry.get().strip()\n        try:\n            parts = urllib.parse.urlsplit(url)\n        except ValueError:\n            parts = None\n        if parts is None or parts.scheme not in (\"http\", \"https\") or not parts.netloc:\n            self.log_line(\"Enter a valid portal URL, e.g. http://example.com:8080\", \"error\")\n            return\n        self.checking = True\n        self.check_button.config(state=\"disabled\")\n        self.check_label.config(text=\"checking…\", foreground=\"#555\")\n        self.log_line(f\"Checking URL: {url} (one request, {CHECK_TIMEOUT} s timeout)…\", \"info\")\n        threading.Thread(target=self._url_check_worker, args=(url,), daemon=True).start()\n\n    def _url_check_worker(self, url):\n        start = time.monotonic()\n        ok = False\n        try:\n            with urllib.request.urlopen(url, timeout=CHECK_TIMEOUT,\n                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"}) as resp:\n                ok = True\n                text = f\"reachable — HTTP {resp.status} in {time.monotonic() - start:.2f} s\"\n                if resp.geturl() != url:\n                    text += f\" (redirected to {resp.geturl()})\"\n        except urllib.error.HTTPError as exc:\n            # Server responded; the status code is still a useful result.\n            text = f\"reachable, but HTTP {exc.code} in {time.monotonic() - start:.2f} s\"\n        except urllib.error.URLError as exc:\n            text = (f\"no response within {CHECK_TIMEOUT} s (timeout)\"\n                    if isinstance(exc.reason, socket.timeout)\n                    else f\"unreachable ({exc.reason})\")\n        except Exception as exc:\n            text = f\"check failed ({exc})\"\n        if not self._destroyed:\n            self.queue.put((\"check_done\", (ok, text)))\n```\n\nNote: urllib's redirect handling: urlopen follows 301/302/303/307 for GET. Final URL via geturl(). Good.\n\nNote: `resp.status` exists in py3.9+; Fedora is fine.\n\nAlso, should we drain the response body? For small pages, urlopen reads the body lazily; not reading the body is fine — the connection is closed on context exit (HTTP/1.0 from SimpleHTTPRequestHandler; real server: closing without reading is fine, no problem).\n\nTimeout: urlopen's timeout applies per socket operation. Conservative: 5s.\n\nAlso update the header comment in the docstring? The module docstring mentions the wrapper. Add a line: \"Includes a one-shot portal URL check (plain GET, no scan).\" A small docstring edit is acceptable.\n\nAlso note: `socket.timeout` is an alias for TimeoutError in 3.10+; isinstance works.\n\nNow let's implement the edits.\n"
+        },
+        {
+          "type": "text",
+          "text": "Ich nehme die Aufgabe an: Die Projektdateien sind verfügbar (`macstalkergui/macstalker/` – Tkinter-GUI `macstalker_gui.py` + `macstalker.sh`). Ich prüfe zuerst den aktuellen Stand, dann setze ich die URL-Prüfung ein.\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "n4NJ4QDwaxuIHtneB4a3LL7sjXeAl5hY",
+          "toolName": "todo---get_items",
+          "input": {}
+        }
+      ],
+      "id": "6f88eaa4-4f44-470c-b9be-00e4dadbc20f",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 26641,
+        "receivedTokens": 5200,
+        "cacheReadTokens": 4096,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636836957
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "n4NJ4QDwaxuIHtneB4a3LL7sjXeAl5hY",
+          "toolName": "todo---get_items",
+          "output": {
+            "type": "json",
+            "value": {
+              "initialUserPrompt": "Build the simplest practical GUI (Tkinter, Fedora) around the existing macstalker.sh scanner: select a .txt proxy file, start scan, live status, results, non-freezing UI, reuse existing scan logic.",
+              "items": [
+                {
+                  "name": "Inspect macstalker.sh, deps, and input interface",
+                  "completed": true
+                },
+                {
+                  "name": "Add minimal machine-readable event output to macstalker.sh (+ PROXY_FILE arg)",
+                  "completed": true
+                },
+                {
+                  "name": "Write macstalker_gui.py Tkinter wrapper (file picker, scan, thread-safe updates)",
+                  "completed": true
+                },
+                {
+                  "name": "Verify: bash -n, py_compile, and an actual headless run of the modified script",
+                  "completed": true
+                },
+                {
+                  "name": "Write integration summary, Fedora install/launch commands, assumptions & test notes",
+                  "completed": true
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "id": "e8f24e1f-a2cc-45a2-a461-406cbd9ab402",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636836957
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Existing TODOs from the previous task are completed. Setting up a new TODO list for this new task (overwriting) — since the request is a new one. Actually, the reminder says to resume existing tasks if they're relevant, but this is a new feature request, so I'll overwrite the TODOs.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "fC2DKSXNgFxBBSI9g2ZoO23B459ySoi9",
+          "toolName": "todo---set_items",
+          "input": {
+            "items": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": false
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": false
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": false
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": false
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": false
+              }
+            ],
+            "initialUserPrompt": "Ergänze die GUI um eine einfache Portal-URL-Prüfung (erreichbar/Status/Redirect/Zeit) ohne UI-Freeze, konservative Einzelanfrage."
+          }
+        }
+      ],
+      "id": "6c5b190e-fb87-474b-abfc-c4f73f24f27f",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 182,
+        "receivedTokens": 256,
+        "cacheReadTokens": 35936,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636846545
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "fC2DKSXNgFxBBSI9g2ZoO23B459ySoi9",
+          "toolName": "todo---set_items",
+          "output": {
+            "type": "text",
+            "value": "Todo items set successfully."
+          }
+        }
+      ],
+      "id": "163437b4-214a-43fd-9bc5-bc24751154b0",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636846545
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "I'm checking the file to confirm the current state matches what I found earlier—it has the file row, params row with the URL field, start and stop buttons, progressbar, and log, with queue polling happening every 100ms. I've reviewed it in detail and made only small edits since then. Now I'm ready to make the edits: starting with the imports and CHECK_ variable.\n\nContinuing with the remaining edits...Ich überprüfe die Datei und trage dann die URL-Prüfung ein.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "b1Y1SAHcFousGdbGMNLKKnvxyHqo2tT7",
+          "toolName": "power---bash",
+          "input": {
+            "command": "cd /home/admin/Dokumente/git-jan/macstalkergui/macstalker && python3 -m py_compile macstalker_gui.py && echo \"py OK\" && grep -n \"def on_stop\\|def poll_queue\\|def _handle_event\\|import\\|CHECK\" macstalker_gui.py | head -20",
+            "description": "Verify current GUI file state",
+            "timeout": 120000
+          }
+        }
+      ],
+      "id": "c1fa5ba1-4942-425c-839e-bc8c52c826f0",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 288,
+        "receivedTokens": 242,
+        "cacheReadTokens": 36114,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636856211
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "b1Y1SAHcFousGdbGMNLKKnvxyHqo2tT7",
+          "toolName": "power---bash",
+          "output": {
+            "type": "json",
+            "value": {
+              "stdout": "py OK\n17:import os\n18:import queue\n19:import re\n20:import signal\n21:import subprocess\n22:import threading\n23:import tkinter as tk\n24:import tkinter.ttk as ttk\n25:from tkinter import filedialog\n277:    def on_stop(self):\n291:    def poll_queue(self):\n304:    def _handle_event(self, item):\n",
+              "stderr": "",
+              "exitCode": 0
+            }
+          }
+        }
+      ],
+      "id": "58c7cb5e-3d1f-432e-bfae-c266bfdd8295",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636856211
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "File state confirmed (matches my memory). Next, I'll make the edit.\n"
+        },
+        {
+          "type": "text",
+          "text": "Datei wie erwartet. Jetzt die Änderungen:\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "hxyegvpwgQTncnPOkjQNOL31HMiEKnjU",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "import os\nimport queue\nimport re\nimport signal\nimport subprocess\nimport threading\nimport tkinter as tk\nimport tkinter.ttk as ttk\nfrom tkinter import filedialog\n\nSCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"macstalker.sh\")",
+            "replacementText": "import os\nimport queue\nimport re\nimport signal\nimport socket\nimport subprocess\nimport threading\nimport time\nimport tkinter as tk\nimport tkinter.ttk as ttk\nimport urllib.error\nimport urllib.parse\nimport urllib.request\nfrom tkinter import filedialog\n\nSCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"macstalker.sh\")\n\n# One-shot portal URL check: a single plain GET with this timeout (no retries).\nCHECK_TIMEOUT = 5",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "bb3a0995-0fdd-431a-b4bb-1aac3b9fc08c",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 129,
+        "receivedTokens": 281,
+        "cacheReadTokens": 36643,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636866473
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "hxyegvpwgQTncnPOkjQNOL31HMiEKnjU",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "2df83144-aaf2-4c0e-a2c3-16cb1408cfa2",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636866473
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Add `self.checking` to `__init__`, and add a row to the UI. Edit `__init__`:\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "ReB6jhRQOcn3Z6kblcCPoVbImd2RWDHY",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "        self.scanning = False\n        self.mac_count = 0",
+            "replacementText": "        self.scanning = False\n        self.checking = False\n        self.mac_count = 0",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "4ed10638-cfff-4bbe-8457-4560ee720c70",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 159,
+        "cacheReadTokens": 37052,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636872392
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "ReB6jhRQOcn3Z6kblcCPoVbImd2RWDHY",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "d1333e3b-05b1-41e6-98c2-c1e29c5a97c1",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636872392
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Next, after the params row, I'll add a UI row (check button + result label):\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "iZZDXJPihlwf1TutZYPPoLPQDMGDrsYx",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "        self.workers_entry = ttk.Entry(params, width=5)\n        self.workers_entry.insert(0, \"10\")\n        self.workers_entry.pack(side=\"left\", padx=6)",
+            "replacementText": "        self.workers_entry = ttk.Entry(params, width=5)\n        self.workers_entry.insert(0, \"10\")\n        self.workers_entry.pack(side=\"left\", padx=6)\n\n        # Row 2b: one-shot check of the portal URL (single GET, no scan)\n        check_row = ttk.Frame(self.root)\n        check_row.pack(fill=\"x\")\n        check_row.pack_configure(**pad)\n        self.check_button = ttk.Button(check_row, text=\"Check portal URL\",\n                                        command=self.on_check_url)\n        self.check_button.pack(side=\"left\")\n        self.check_label = ttk.Label(check_row, text=\"(not checked yet)\", foreground=\"#555\")\n        self.check_label.pack(side=\"left\", padx=(12, 0))",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "191bcfbe-c16d-44f3-861d-6201ddd06591",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 330,
+        "cacheReadTokens": 37250,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636884059
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "iZZDXJPihlwf1TutZYPPoLPQDMGDrsYx",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "6de9116c-9a08-4b7f-99b1-cab296d563da",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636884059
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Alright, so after on_stop (before the main loop plumbing) I'll add the check method, and extend _handle_event.\n"
+        },
+        {
+          "type": "text",
+          "text": "Jetzt die Prüf-Methoden (nach `on_stop`) und die Queue-Behandlung:\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "dC4Rxv1tWZYuK6JNI7hNV27hPQFzViii",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "    # ---------- main loop plumbing ----------",
+            "replacementText": "    # ---------- portal URL check ----------\n\n    def on_check_url(self):\n        # Validates the URL and starts ONE low-impact GET to the exact URL\n        # in the \"Portal URL\" field (no crawl, no retries, no credentials)\n        # in a background thread so the window stays responsive.\n        if self.checking:\n            return\n        url = self.url_entry.get().strip()\n        try:\n            parts = urllib.parse.urlsplit(url)\n        except ValueError:\n            parts = None\n        if parts is None or parts.scheme not in (\"http\", \"https\") or not parts.netloc:\n            self.log_line(\"Enter a valid portal URL, e.g. http://example.com:8080\", \"error\")\n            return\n        self.checking = True\n        self.check_button.config(state=\"disabled\")\n        self.check_label.config(text=\"checking…\", foreground=\"#555\")\n        self.log_line(f\"Checking URL: {url} (one request, {CHECK_TIMEOUT} s timeout)…\", \"info\")\n        threading.Thread(target=self._url_check_worker, args=(url,), daemon=True).start()\n\n    def _url_check_worker(self, url):\n        start = time.monotonic()\n        ok = False\n        try:\n            with urllib.request.urlopen(url, timeout=CHECK_TIMEOUT,\n                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"}) as resp:\n                ok = True\n                text = f\"reachable — HTTP {resp.status} in {time.monotonic() - start:.2f} s\"\n                if resp.geturl() != url:\n                    text += f\" (redirected to {resp.geturl()})\"\n        except urllib.error.HTTPError as exc:\n            # The server answered; the status code is still a useful result.\n            text = f\"reachable, but HTTP {exc.code} in {time.monotonic() - start:.2f} s\"\n        except urllib.error.URLError as exc:\n            text = (f\"no response within {CHECK_TIMEOUT} s (timeout)\"\n                    if isinstance(exc.reason, socket.timeout)\n                    else f\"unreachable ({exc.reason})\")\n        except Exception as exc:\n            text = f\"check failed ({exc})\"\n        if not self._destroyed:\n            self.queue.put((\"check_done\", (ok, text)))\n\n    # ---------- main loop plumbing ----------",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "429c8adf-8f3e-4b69-a49f-a31517b8e7cd",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 675,
+        "cacheReadTokens": 37619,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636907358
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "dC4Rxv1tWZYuK6JNI7hNV27hPQFzViii",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "b7948164-a21d-479f-b18e-b481a5e1a207",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636907358
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Wait — on_check_url logs to the log before the thread starts, but the log is written from the main thread — OK. However, `self.log_line` inside `on_check_url` is fine.\n\nNote: I used an em dash in the f-string of `_url_check_worker`, but this is fine in UTF-8.\n\nNext, extend `_handle_event`:\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "Odz37lqLfsrIq3MiadcoosXdLMN1q3xK",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "    def _handle_event(self, item):\n        kind, text = item\n        if kind == \"progress\":\n            self.status_label.config(text=f\"{self.mac_count} found — {text}\")\n        else:\n            self.log_line(text, kind)\n            if kind == \"found\":\n                self.status_label.config(text=f\"{self.mac_count} found\")",
+            "replacementText": "    def _handle_event(self, item):\n        kind, text = item\n        if kind == \"progress\":\n            self.status_label.config(text=f\"{self.mac_count} found — {text}\")\n        elif kind == \"check_done\":\n            self._handle_check_done(text)\n        else:\n            self.log_line(text, kind)\n            if kind == \"found\":\n                self.status_label.config(text=f\"{self.mac_count} found\")\n\n    def _handle_check_done(self, result):\n        ok, message = result\n        self.checking = False\n        self.check_button.config(state=\"normal\")\n        self.check_label.config(text=message, foreground=\"\" if ok else \"#e06c75\")\n        self.log_line((\"Portal check OK: \" if ok else \"Portal check failed: \") + message,\n                      \"found\" if ok else \"error\")",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "af70e875-c386-4909-a6b6-bafccdb9dc63",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 440,
+        "cacheReadTokens": 38333,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636922828
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "Odz37lqLfsrIq3MiadcoosXdLMN1q3xK",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "3c351bd0-5ae6-4066-934c-ff806a5d5ccc",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636922828
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Also, should I update the module's docstring too, concisely? Adding one line:\n\n```\nThe GUI does not reimplement the scanner: ... displays\nthe scanner's event lines (PROGRESS| / FOUND| / SUMMARY|) in a log.\n```\nAdd: \"It also offers a one-shot portal URL check (single GET, availability only).\" — small enough, a worthwhile addition. Let's go ahead and do it.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "Kibir3CECnC6I9dVG35N2F3NxDZ6aUTK",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "The GUI does not reimplement the scanner: it runs macstalker.sh as a\nsubprocess, answers its two stdin prompts (max MACs, workers), and displays\nthe scanner's event lines (PROGRESS| / FOUND| / SUMMARY|) in a log.",
+            "replacementText": "The GUI does not reimplement the scanner: it runs macstalker.sh as a\nsubprocess, answers its two stdin prompts (max MACs, workers), and displays\nthe scanner's event lines (PROGRESS| / FOUND| / SUMMARY|) in a log.\nIt also offers a one-shot portal URL check (a single plain GET to the exact\nentered URL — availability only, no crawling or repeated requests).",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "ba0cc95b-c7d4-4fdd-85eb-f95caa81d15d",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 334,
+        "cacheReadTokens": 38812,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636934697
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "Kibir3CECnC6I9dVG35N2F3NxDZ6aUTK",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "372430e8-99b0-4193-b81e-38c9e678bed9",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636934697
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Alright, let's compile and run headless tests: 200 OK, redirect, 404, connection refused, invalid URL, and that the UI doesn't freeze.\n\nTest script that spins up a custom handler: /a → 302 to /b, /b → 200, / → 200, others → 404. Then use the GUI methods.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "KuAghJ3B519ywAG1fX8xXmxTQbW68TW7",
+          "toolName": "power---bash",
+          "input": {
+            "command": "cd /home/admin/Dokumente/git-jan/macstalkergui/macstalker && python3 -m py_compile macstalker_gui.py && echo \"py OK\"",
+            "description": "Compile check after edits",
+            "timeout": 120000
+          }
+        }
+      ],
+      "id": "09254be3-123d-4824-9b9b-95a8f5cfe14a",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 184,
+        "cacheReadTokens": 39185,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636941676
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "KuAghJ3B519ywAG1fX8xXmxTQbW68TW7",
+          "toolName": "power---bash",
+          "output": {
+            "type": "json",
+            "value": {
+              "stdout": "py OK\n",
+              "stderr": "",
+              "exitCode": 0
+            }
+          }
+        }
+      ],
+      "id": "21aef5fe-7334-4f6a-8db5-e845fb33b79e",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636941676
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Next up is a headless test using an actual local HTTP server (200, redirect, 404, connection refused, invalid input):\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "9fzuZHfdJe6bieNopNzVvMIDYMXZGQ7o",
+          "toolName": "power---bash",
+          "input": {
+            "command": "cd /home/admin/Dokumente/git-jan/macstalkergui/macstalker && DISPLAY=:0 python3 - <<'EOF'\nimport http.server, threading, time, tkinter as tk\nimport macstalker_gui\n\nclass H(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        if self.path == \"/a\":\n            self.send_response(302); self.send_header(\"Location\", \"/b\"); self.end_headers()\n        elif self.path == \"/b\" or self.path == \"/\":\n            self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n        else:\n            self.send_response(404); self.end_headers()\n    def log_message(self, *a): pass\n\nsrv = http.server.HTTPServer((\"127.0.0.1\", 0), H)\nport = srv.server_address[1]\nthreading.Thread(target=srv.serve_forever, daemon=True).start()\n\nroot = tk.Tk(); app = macstalker_gui.MacstalkerApp(root)\nassert str(app.check_button['state']) == 'normal'\n\ndef wait_check(timeout=10):\n    deadline = time.time() + timeout\n    while app.checking and time.time() < deadline:\n        root.update(); time.sleep(0.05)\n    assert not app.checking, \"check did not finish (UI freeze?)\"\n    root.update()\n\ndef set_url(u):\n    app.url_entry.delete(0, \"end\"); app.url_entry.insert(0, u)\n\n# 1) 200 OK\nset_url(f\"http://127.0.0.1:{port}/\"); app.on_check_url(); wait_check()\nprint(\"200:\", app.check_label.cget(\"text\"))\nassert app.check_label.cget(\"text\").startswith(\"reachable — HTTP 200\")\nassert str(app.check_button['state']) == 'normal'\n\n# 2) Redirect\nset_url(f\"http://127.0.0.1:{port}/a\"); app.on_check_url(); wait_check()\nprint(\"redirect:\", app.check_label.cget(\"text\"))\nassert \"redirected to\" in app.check_label.cget(\"text\")\n\n# 3) HTTP 404\nset_url(f\"http://127.0.0.1:{port}/nope\"); app.on_check_url(); wait_check()\nprint(\"404:\", app.check_label.cget(\"text\"))\nassert \"HTTP 404\" in app.check_label.cget(\"text\")\n\n# 4) Connection refused\nset_url(\"http://127.0.0.1:1/\"); app.on_check_url(); wait_check()\nprint(\"refused:\", app.check_label.cget(\"text\"))\nassert \"unreachable\" in app.check_label.cget(\"text\")\n\n# 5) Invalid inputs — no thread started\nfor bad in (\"not a url\", \"\", \"http://\", \"ftp://x.com\"):\n    set_url(bad); app.on_check_url()\n    assert not app.checking and app.check_button['state'] not in ('disabled',), bad\nprint(\"invalid inputs handled\")\n\n# 6) Log contains results with proper tags\ntags = set()\nfor r in app.log.get(\"1.0\", \"end\", \"tags\"):\n    if r != \"sel\": tags.add(r)\nprint(\"tags used:\", sorted(tags))\nassert {\"found\", \"error\", \"info\"} <= tags\n\napp.on_close()\nprint(\"URL-CHECK TESTS OK\")\nEOF",
+            "description": "Headless GUI test of URL check feature",
+            "timeout": 120000
+          }
+        }
+      ],
+      "id": "5116bdbd-8a76-4f27-b069-bf1e453ddd03",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 30,
+        "receivedTokens": 872,
+        "cacheReadTokens": 39408,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636972223
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "9fzuZHfdJe6bieNopNzVvMIDYMXZGQ7o",
+          "toolName": "power---bash",
+          "output": {
+            "type": "json",
+            "value": {
+              "stdout": "200: check failed (urlopen() got an unexpected keyword argument 'headers')\n",
+              "stderr": "Traceback (most recent call last):\n  File \"<stdin>\", line 34, in <module>\nAssertionError\n",
+              "exitCode": 1
+            }
+          }
+        }
+      ],
+      "id": "ad4e32ae-6cd1-41a0-81d5-4f28196e1c9b",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636972223
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Bug: `urllib.request.urlopen(url, timeout=..., headers=...)` — urlopen doesn't accept `headers` as a keyword argument; headers are set via Request. Fix:\n\n```python\nreq = urllib.request.Request(url, headers={\"User-Agent\": \"macstalker-gui/1.0\"})\nwith urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:\n```\n"
+        },
+        {
+          "type": "text",
+          "text": "Test caught a real bug: `urlopen()` doesn't accept a `headers` keyword — headers must go via `Request`. Fixing:\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "jD8F8kqUQ4bSYBEAHkwXmcIB50yUsUTt",
+          "toolName": "power---file_edit",
+          "input": {
+            "filePath": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py",
+            "searchTerm": "        start = time.monotonic()\n        ok = False\n        try:\n            with urllib.request.urlopen(url, timeout=CHECK_TIMEOUT,\n                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"}) as resp:",
+            "replacementText": "        start = time.monotonic()\n        ok = False\n        try:\n            req = urllib.request.Request(url,\n                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"})\n            with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:",
+            "isRegex": false,
+            "replaceAll": false
+          }
+        }
+      ],
+      "id": "a12fe2b9-fc3c-4b77-a345-79fa990d4556",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 77,
+        "receivedTokens": 321,
+        "cacheReadTokens": 40309,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636983868
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "jD8F8kqUQ4bSYBEAHkwXmcIB50yUsUTt",
+          "toolName": "power---file_edit",
+          "output": {
+            "type": "text",
+            "value": "Successfully edited '/home/admin/Dokumente/git-jan/macstalkergui/macstalker/macstalker_gui.py'."
+          }
+        }
+      ],
+      "id": "0415ab84-3f32-4c9d-8a2b-5f98fe88ec70",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792636983868
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Wait: The Request headers dict replaces the default headers — including User-Agent. In urllib, `Request(url, headers)` — the headers dict is for headers other than User-agent... actually, the `headers` parameter of the Request constructor is for setting arbitrary headers, and it does not replace the default User-Agent. The default User-Agent \"Python-urllib\" is added only if User-Agent is not set... actually: `Request.add_header('User-Agent', ...)` adds to the `self.headers` dict; urlopen uses `req.headers` (case-insensitive lookup) for the Request object's headers. The default User-Agent \"Python-urllib\" is set in Request.__init__ via add_header. If I pass a headers dict containing \"User-Agent\", it goes into req.unredirected_hdrs... hmm.\n\nLet me recall: `Request.__init__(self, url, data=None, headers={}, ...)` — `self.headers = {}`, then `for key in headers: self.add_header(key, val)`. So the User-Agent in the passed dict replaces via add_header? add_header(key, val) does `self[key] = val` on self.headers (case-insensitive dict-like). __init__ first executes `self.add_header('User-Agent', 'Python-urllib/2.7')`, and then... no wait, in the actual code:\n\n```python\ndef __init__(self, url, data=None, headers={},\n             skip_refresh=False, parser=None):\n    ...\n    self.headers = {}\n    for key, value in headers.items():\n        self.add_header(key, value)\n    ...\n    self.add_header('User-Agent', _default_headers.get_default() ... 'Python-urllib/3')\n```\n\nThe default User-Agent is added after the user's headers, overwriting mine? Let me check the order in CPython's urllib.request.Request.__init__:\n\n```python\n    def __init__(self, url, data=None, headers={},\n                 skip_refresh=False, parser=None):\n        self.full_url = url\n        ...\n        self.headers = {}\n        for key, value in headers.items():\n            self.add_header(key, value)\n\n        self._http_request = HTTPRequest(self.get_method(), self._tunnel_host)\n```\n\nHmm, where is User-Agent added? Inside `Request.add_headers`? No... The default User-Agent is added in `AbstractHTTPHandler.do_request_`:\n\n```python\n    def do_request_(self, request):\n        host = request.host...\n        ...\n        if not request.has_header('User-agent')... \n```\n\nActually, do_request_ executes:\n```python\n        if request.host:\n            if not request.has_header('Host')...\n```\nHmm. The real code:\n\n```python\n    def do_request_(self, request):\n        host = request.host\n        if not host:\n            raise ValueError(...)\n        if request.host:\n            sel = request.selector\n        ...\n        if not request.has_header('User-agent') ...\n```\n\nLet me just recall simply: `do_request_` has:\n```python\n        if request.host:\n            if not request.has_header('Host'):\n                request.add_unredirected_header('Host', host)\n```\nAnd the User-Agent default: in `Request.__init__`? No. The default User-Agent \"Python-urllib\" is set in `urllib.request.Request.__init__`: `self.add_header('User-Agent', _ua_string)`, with `_ua_string = _get_default_proxies...`? In the actual source:\n\n```python\n_default_user_agent = \"Python/\" + urllib... \"Python-urllib/%s\" % __version__\n\nclass Request:\n    def __init__(...):\n        ...\n        self.headers = {}\n        for key, value in headers.items():\n            self.add_header(key, value)\n```\n\nAnd in do_request_ (HTTPHandler):\n```python\n    def do_request_(self, request):\n        ...\n        if not request.has_header('User-agent'):\n            request.add_unredirected_header('User-agent', _default_user_agent)\n```\n\nHmm, I think the default is added when it's not present (add_unredirected_header is case-insensitive? `has_header` is case-insensitive). Since I pass \"User-Agent\", has_header('User-agent') → True → my UA is used. Good — the headers dict passed to Request goes through add_header and is used.\n\nMy concern was unfounded — this is the standard pattern. The test failure was purely due to the `headers=` keyword argument on urlopen, which is now fixed.\n\nRe-running the test.\n"
+        },
+        {
+          "type": "text",
+          "text": "Jetzt erneut den Test:\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "4VC0QDTVQ7rcwp7YyFIHFbUmeGfxuJ4T",
+          "toolName": "power---bash",
+          "input": {
+            "command": "cd /home/admin/Dokumente/git-jan/macstalkergui/macstalker && python3 -m py_compile macstalker_gui.py && DISPLAY=:0 python3 - <<'EOF'\nimport http.server, threading, time, tkinter as tk\nimport macstalker_gui\n\nclass H(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        if self.path == \"/a\":\n            self.send_response(302); self.send_header(\"Location\", \"/b\"); self.end_headers()\n        elif self.path == \"/b\" or self.path == \"/\":\n            self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n        else:\n            self.send_response(404); self.end_headers()\n    def log_message(self, *a): pass\n\nsrv = http.server.HTTPServer((\"127.0.0.1\", 0), H)\nport = srv.server_address[1]\nthreading.Thread(target=srv.serve_forever, daemon=True).start()\n\nroot = tk.Tk(); app = macstalker_gui.MacstalkerApp(root)\nassert str(app.check_button['state']) == 'normal'\n\ndef wait_check(timeout=10):\n    deadline = time.time() + timeout\n    while app.checking and time.time() < deadline:\n        root.update(); time.sleep(0.05)\n    assert not app.checking, \"check did not finish (UI freeze?)\"\n    root.update()\n\ndef set_url(u):\n    app.url_entry.delete(0, \"end\"); app.url_entry.insert(0, u)\n\nset_url(f\"http://127.0.0.1:{port}/\"); app.on_check_url(); wait_check()\nprint(\"200:\", app.check_label.cget(\"text\"))\nassert app.check_label.cget(\"text\").startswith(\"reachable — HTTP 200\")\nassert str(app.check_button['state']) == 'normal'\n\nset_url(f\"http://127.0.0.1:{port}/a\"); app.on_check_url(); wait_check()\nprint(\"redirect:\", app.check_label.cget(\"text\"))\nassert \"redirected to\" in app.check_label.cget(\"text\")\n\nset_url(f\"http://127.0.0.1:{port}/nope\"); app.on_check_url(); wait_check()\nprint(\"404:\", app.check_label.cget(\"text\"))\nassert \"HTTP 404\" in app.check_label.cget(\"text\")\n\nset_url(\"http://127.0.0.1:1/\"); app.on_check_url(); wait_check()\nprint(\"refused:\", app.check_label.cget(\"text\"))\nassert \"unreachable\" in app.check_label.cget(\"text\")\n\nfor bad in (\"not a url\", \"\", \"http://\", \"ftp://x.com\"):\n    set_url(bad); app.on_check_url()\n    assert not app.checking and app.check_button['state'] not in ('disabled',), bad\nprint(\"invalid inputs handled\")\n\ntags = set()\nfor r in app.log.get(\"1.0\", \"end\", \"tags\"):\n    if r != \"sel\": tags.add(r)\nprint(\"tags used:\", sorted(tags))\nassert {\"found\", \"error\", \"info\"} <= tags\n\napp.on_close()\nprint(\"URL-CHECK TESTS OK\")\nEOF",
+            "description": "Re-run headless URL-check tests",
+            "timeout": 120000
+          }
+        }
+      ],
+      "id": "49da35f1-7d8e-4be0-9144-6ac84faccf79",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 40,
+        "receivedTokens": 1804,
+        "cacheReadTokens": 40706,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637046544
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "4VC0QDTVQ7rcwp7YyFIHFbUmeGfxuJ4T",
+          "toolName": "power---bash",
+          "output": {
+            "type": "json",
+            "value": {
+              "stdout": "200: reachable — HTTP 200 in 0.00 s\nredirect: reachable — HTTP 200 in 0.00 s (redirected to http://127.0.0.1:39411/b)\n404: reachable, but HTTP 404 in 0.00 s\nrefused: unreachable ([Errno 111] Connection refused)\ninvalid inputs handled\n",
+              "stderr": "Traceback (most recent call last):\n  File \"<stdin>\", line 54, in <module>\nTypeError: Text.get() takes from 2 to 3 positional arguments but 4 were given\n",
+              "exitCode": 1
+            }
+          }
+        }
+      ],
+      "id": "92107fef-8e60-42f1-a70a-ac130060bf76",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637046544
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "All functional checks passed. The last failure is an issue on the test script side (in this Python version, `Text.get(\"1.0\",\"end\",\"tags\")` — the 3-argument form with tags is not supported? Actually, in Python 3.14's tkinter, get() only accepts up to index1... In Tk, `text get first ?last?` does not accept a tags argument. My test line is wrong. It should be `app.log.get(\"1.0\", \"end\")` and then use item ranges with get(tag, ...)... More simply: `app.log.tag_ranges(\"found\")` etc. Let me just check tag_ranges.\n"
+        },
+        {
+          "type": "text",
+          "text": "Alle funktionalen Checks erfolgreich — nur mein Test-Tag-Check war fehlerhaft (Tkinter-API). Kurze Verifikation der Log-Tags:\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "yvLs8eSijDoJnqTH5VvV1l2LYoFK2kmA",
+          "toolName": "power---bash",
+          "input": {
+            "command": "cd /home/admin/Dokumente/git-jan/macstalkergui/macstalker && DISPLAY=:0 python3 - <<'EOF'\nimport http.server, threading, time, tkinter as tk\nimport macstalker_gui\n\nclass H(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200); self.end_headers(); self.wfile.write(b\"ok\")\n    def log_message(self, *a): pass\n\nsrv = http.server.HTTPServer((\"127.0.0.1\", 0), H)\nport = srv.server_address[1]\nthreading.Thread(target=srv.serve_forever, daemon=True).start()\n\nroot = tk.Tk(); app = macstalker_gui.MacstalkerApp(root)\napp.url_entry.insert(0, f\"http://127.0.0.1:{port}/\")\napp.on_check_url()\ndeadline = time.time() + 10\nwhile app.checking and time.time() < deadline:\n    root.update(); time.sleep(0.05)\nroot.update()\nfor tag in (\"found\", \"error\", \"info\"):\n    ranges = app.log.tag_ranges(tag)\n    print(tag, \"ranges:\", ranges)\napp.on_close()\nprint(\"LOG TAG TEST OK\")\nEOF",
+            "description": "Verify log tag usage for check results",
+            "timeout": 120000
+          }
+        }
+      ],
+      "id": "7052d75c-1792-4d04-8224-56b4bd53d9bc",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 173,
+        "receivedTokens": 521,
+        "cacheReadTokens": 42549,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637065736
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "yvLs8eSijDoJnqTH5VvV1l2LYoFK2kmA",
+          "toolName": "power---bash",
+          "output": {
+            "type": "json",
+            "value": {
+              "stdout": "found ranges: (<textindex object: '2.0'>, <textindex object: '3.0'>)\nerror ranges: ()\ninfo ranges: (<textindex object: '1.0'>, <textindex object: '2.0'>)\nLOG TAG TEST OK\n",
+              "stderr": "",
+              "exitCode": 0
+            }
+          }
+        }
+      ],
+      "id": "a11907c8-d471-491f-9cfc-d484a9507091",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637065736
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Everything works. Final consistency check: re-read the modified sections of the file to present the final state, confirm there are no other references, and run py_compile one more time at the end. Also, mark the TODO as complete. After that, answer in German including the patch (file name + full file contents, or a concise patch). The requirements state \"provide the implementation as a concise patch or the full contents of each modified file.\" The modified file is macstalker_gui.py only. I'll provide a concise patch (diff-style) — the diff is cleaner than the full 380-line file. Present the patch as SEARCH/REPLACE blocks? Better approach: show the diff hunks. Present it as a unified diff-style list of the 6 changes.\n\nFor accuracy, let's create the actual diff: git diff in the workspace (a .git exists). Run git diff.\n"
+        },
+        {
+          "type": "text",
+          "text": "Alles grün. Zum Abschluss hole ich den echten Diff für die Darstellung:\n\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "uvmRvqeYswHXRPYDgUfvXfnfbZQd8zVH",
+          "toolName": "power---bash",
+          "input": {
+            "command": "cd /home/admin/Dokumente/git-jan/macstalkergui/macstalker && git diff --stat && git diff macstalker_gui.py",
+            "description": "Show git diff of GUI changes",
+            "timeout": 120000
+          }
+        }
+      ],
+      "id": "7d94c04b-b8c4-4ad9-93e4-4916b231d27c",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 90,
+        "receivedTokens": 294,
+        "cacheReadTokens": 43242,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637076575
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "uvmRvqeYswHXRPYDgUfvXfnfbZQd8zVH",
+          "toolName": "power---bash",
+          "output": {
+            "type": "json",
+            "value": {
+              "stdout": " __pycache__/macstalker_gui.cpython-314.pyc | Bin 20031 -> 25079 bytes\n macstalker_gui.py                          |  76 +++++++++++++++++++++++++++++\n 2 files changed, 76 insertions(+)\ndiff --git a/macstalker_gui.py b/macstalker_gui.py\nindex 26e797b..c7bee59 100644\n--- a/macstalker_gui.py\n+++ b/macstalker_gui.py\n@@ -4,6 +4,8 @@\n The GUI does not reimplement the scanner: it runs macstalker.sh as a\n subprocess, answers its two stdin prompts (max MACs, workers), and displays\n the scanner's event lines (PROGRESS| / FOUND| / SUMMARY|) in a log.\n+It also offers a one-shot portal URL check (a single plain GET to the exact\n+entered URL — availability only, no crawling or repeated requests).\n \n Note on the proxy file: macstalker.sh generates and tests MACs directly and\n does not itself use a proxy list. The .txt file is selected here (and passed\n@@ -18,14 +20,22 @@ import os\n import queue\n import re\n import signal\n+import socket\n import subprocess\n import threading\n+import time\n import tkinter as tk\n import tkinter.ttk as ttk\n+import urllib.error\n+import urllib.parse\n+import urllib.request\n from tkinter import filedialog\n \n SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"macstalker.sh\")\n \n+# One-shot portal URL check: a single plain GET with this timeout (no retries).\n+CHECK_TIMEOUT = 5\n+\n ANSI_RE = re.compile(r\"\\x1b\\[[0-9;]*[A-Za-z]\")\n \n \n@@ -40,6 +50,7 @@ class MacstalkerApp:\n         self.proc = None\n         self.proxy_file = None\n         self.scanning = False\n+        self.checking = False\n         self.mac_count = 0\n         self._closing = False\n         self._destroyed = False\n@@ -89,6 +100,16 @@ class MacstalkerApp:\n         self.workers_entry.insert(0, \"10\")\n         self.workers_entry.pack(side=\"left\", padx=6)\n \n+        # Row 2b: one-shot check of the portal URL (single GET, no scan)\n+        check_row = ttk.Frame(self.root)\n+        check_row.pack(fill=\"x\")\n+        check_row.pack_configure(**pad)\n+        self.check_button = ttk.Button(check_row, text=\"Check portal URL\",\n+                                        command=self.on_check_url)\n+        self.check_button.pack(side=\"left\")\n+        self.check_label = ttk.Label(check_row, text=\"(not checked yet)\", foreground=\"#555\")\n+        self.check_label.pack(side=\"left\", padx=(12, 0))\n+\n         # Row 3: Start / Stop\n         btn_frame = ttk.Frame(self.root)\n         btn_frame.pack(fill=\"x\")\n@@ -286,6 +307,51 @@ class MacstalkerApp:\n             else:\n                 self._kill_proc()\n \n+    # ---------- portal URL check ----------\n+\n+    def on_check_url(self):\n+        # Validates the URL and starts ONE low-impact GET to the exact URL\n+        # in the \"Portal URL\" field (no crawl, no retries, no credentials)\n+        # in a background thread so the window stays responsive.\n+        if self.checking:\n+            return\n+        url = self.url_entry.get().strip()\n+        try:\n+            parts = urllib.parse.urlsplit(url)\n+        except ValueError:\n+            parts = None\n+        if parts is None or parts.scheme not in (\"http\", \"https\") or not parts.netloc:\n+            self.log_line(\"Enter a valid portal URL, e.g. http://example.com:8080\", \"error\")\n+            return\n+        self.checking = True\n+        self.check_button.config(state=\"disabled\")\n+        self.check_label.config(text=\"checking…\", foreground=\"#555\")\n+        self.log_line(f\"Checking URL: {url} (one request, {CHECK_TIMEOUT} s timeout)…\", \"info\")\n+        threading.Thread(target=self._url_check_worker, args=(url,), daemon=True).start()\n+\n+    def _url_check_worker(self, url):\n+        start = time.monotonic()\n+        ok = False\n+        try:\n+            req = urllib.request.Request(url,\n+                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"})\n+            with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:\n+                ok = True\n+                text = f\"reachable — HTTP {resp.status} in {time.monotonic() - start:.2f} s\"\n+                if resp.geturl() != url:\n+                    text += f\" (redirected to {resp.geturl()})\"\n+        except urllib.error.HTTPError as exc:\n+            # The server answered; the status code is still a useful result.\n+            text = f\"reachable, but HTTP {exc.code} in {time.monotonic() - start:.2f} s\"\n+        except urllib.error.URLError as exc:\n+            text = (f\"no response within {CHECK_TIMEOUT} s (timeout)\"\n+                    if isinstance(exc.reason, socket.timeout)\n+                    else f\"unreachable ({exc.reason})\")\n+        except Exception as exc:\n+            text = f\"check failed ({exc})\"\n+        if not self._destroyed:\n+            self.queue.put((\"check_done\", (ok, text)))\n+\n     # ---------- main loop plumbing ----------\n \n     def poll_queue(self):\n@@ -305,11 +371,21 @@ class MacstalkerApp:\n         kind, text = item\n         if kind == \"progress\":\n             self.status_label.config(text=f\"{self.mac_count} found — {text}\")\n+        elif kind == \"check_done\":\n+            self._handle_check_done(text)\n         else:\n             self.log_line(text, kind)\n             if kind == \"found\":\n                 self.status_label.config(text=f\"{self.mac_count} found\")\n \n+    def _handle_check_done(self, result):\n+        ok, message = result\n+        self.checking = False\n+        self.check_button.config(state=\"normal\")\n+        self.check_label.config(text=message, foreground=\"\" if ok else \"#e06c75\")\n+        self.log_line((\"Portal check OK: \" if ok else \"Portal check failed: \") + message,\n+                      \"found\" if ok else \"error\")\n+\n     def _on_scan_done(self, code):\n         self.set_scanning(False)\n         if code == 0:\n",
+              "stderr": "",
+              "exitCode": 0
+            }
+          }
+        }
+      ],
+      "id": "13aefdbd-1f0f-4d90-b3aa-fc291984c795",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637076575
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The diff is clean (76 lines added, 0 lines deleted). Next, I'll mark the todo as complete, save to memory, and write the German response.\n\nMarking the todo:\n- Item 1: Re-verify current state — done\n- Item 2: Add URL check — done\n- Item 3: Headless testing — done\n- Item 4: Present patch — about to do it now (will mark complete after the response; mark it now)\n- Item 5: Save to memory\n\nI'll update the todo and save to memory in parallel.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "Hyt1eMuObZ9xIBNmkSTdLptynNcoV52X",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Re-verify current macstalker_gui.py state and conventions",
+            "completed": true
+          }
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "Yl1V3mwVj3GMnFMA2TvNbMkQqiCB9THb",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+            "completed": true
+          }
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "DXAY6vnyoK8ATdNtkDvj7CX7v4ewLFDd",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+            "completed": true
+          }
+        }
+      ],
+      "id": "a1b7e034-2957-4c80-9d89-9e0d4f70bc60",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 1635,
+        "receivedTokens": 299,
+        "cacheReadTokens": 43625,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637093052
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "Hyt1eMuObZ9xIBNmkSTdLptynNcoV52X",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": false
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": true
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": false
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": false
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "tool-result",
+          "toolCallId": "Yl1V3mwVj3GMnFMA2TvNbMkQqiCB9THb",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": false
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": true
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": false
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": false
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "tool-result",
+          "toolCallId": "DXAY6vnyoK8ATdNtkDvj7CX7v4ewLFDd",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": true
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": false
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": false
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": false
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": false
+              }
+            ]
+          }
+        }
+      ],
+      "id": "4393ea09-a8bb-4d8d-801b-e64467ebfddc",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637093052
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Parallel call collision occurred again (two items were updated). Currently marking \"Headless test\" and \"Present patch\", and saving to memory.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "acwCFTjJ8k8Y2AsGLRZQ1MPKXCwsp9UA",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+            "completed": true
+          }
+        }
+      ],
+      "id": "74a7a87b-5389-40aa-bef8-122f36e01c07",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 341,
+        "receivedTokens": 95,
+        "cacheReadTokens": 45558,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637097929
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "acwCFTjJ8k8Y2AsGLRZQ1MPKXCwsp9UA",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": false
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": true
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": true
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": false
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": false
+              }
+            ]
+          }
+        }
+      ],
+      "id": "9042d5b4-449d-471e-b93a-2ee67ed605d4",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637097929
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Interesting — \"Re-verify current state\" went back to false (the parallel call race got reset). It's a trivial thing. I'll mark the remaining items and save memory.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "2jlLkWaSUlM3fz0yFBnvqwvBQqJtTWCZ",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Present patch, run/test instructions, assumptions (German)",
+            "completed": true
+          }
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "SfeHDvjVanKC0TSUKH5SVwwtrqZ8lTFY",
+          "toolName": "memory---store_memory",
+          "input": {
+            "type": "code-pattern",
+            "content": "macstalker_gui.py now includes a one-shot portal URL check: \"Check portal URL\" button + result label row; on_check_url validates with urllib.parse.urlsplit (http/https, netloc) on the main thread, spawns daemon thread _url_check_worker doing exactly ONE urllib Request GET with CHECK_TIMEOUT=5 and User-Agent \"macstalker-gui/1.0\"; urllib follows redirects and reports final URL via resp.geturl(); errors: HTTPError -> status code (ok=False but reachable), URLError reason (socket.timeout -> timeout msg), generic Exception. Result queued as (\"check_done\", (ok, text)) through the existing queue/poll_queue mechanism and rendered in log (tags found/error) + check_label. No new dependencies (stdlib urllib only)."
+          }
+        }
+      ],
+      "id": "e4d7c157-cfa2-4e4f-9179-6c8aa50b2226",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 121,
+        "receivedTokens": 290,
+        "cacheReadTokens": 45993,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637108890
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "2jlLkWaSUlM3fz0yFBnvqwvBQqJtTWCZ",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": false
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": true
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": true
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": true
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": false
+              }
+            ]
+          }
+        },
+        {
+          "type": "tool-result",
+          "toolCallId": "SfeHDvjVanKC0TSUKH5SVwwtrqZ8lTFY",
+          "toolName": "memory---store_memory",
+          "output": {
+            "type": "json",
+            "value": {
+              "success": true,
+              "id": "1b0ce71e-d1cf-433c-b6b4-a74189f0ff8e"
+            }
+          }
+        }
+      ],
+      "id": "89fbcde5-c10e-48a5-ab20-8b5131f9caaa",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637108890
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "Mark the remaining 2 items (re-verification and save to memory) as complete — the save-to-memory is done, and re-verification was actually completed. Do it with 2 sequential calls? Parallel calls collided last time. Do them one at a time? Or just leave it as is — it's not important. Do 1 call for \"Store memory\" and 1 for \"Re-verify\". Execute sequentially in separate blocks.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "UrZ1DN0a8imLdnx9pqRvLA3rLTSAMN1L",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Store memory of URL-check integration",
+            "completed": true
+          }
+        }
+      ],
+      "id": "e27f53cc-ed1e-4db9-ab4b-f6f424a2c4ea",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 164,
+        "receivedTokens": 139,
+        "cacheReadTokens": 46403,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637114819
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "UrZ1DN0a8imLdnx9pqRvLA3rLTSAMN1L",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": false
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": true
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": true
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": true
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": true
+              }
+            ]
+          }
+        }
+      ],
+      "id": "8d4cf2b0-56ba-44df-984d-ca234cadea2a",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637114819
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "The \"re-verify\" item keeps toggling between true/false due to parallel processing conflicts (I called it first and marked it true, but it's showing false now — the initial call in the parallel batch probably raced). It's actually completed (I re-verified the state of the file). Marking it once more.\n"
+        },
+        {
+          "type": "tool-call",
+          "toolCallId": "lWRE8JWv6udiAfzRL1dyWc8haeOYoQAF",
+          "toolName": "todo---update_item_completion",
+          "input": {
+            "name": "Re-verify current macstalker_gui.py state and conventions",
+            "completed": true
+          }
+        }
+      ],
+      "id": "3d463c91-a139-4df4-af8e-b37ef55099b9",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 121,
+        "receivedTokens": 121,
+        "cacheReadTokens": 46705,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637119877
+    },
+    {
+      "role": "tool",
+      "content": [
+        {
+          "type": "tool-result",
+          "toolCallId": "lWRE8JWv6udiAfzRL1dyWc8haeOYoQAF",
+          "toolName": "todo---update_item_completion",
+          "output": {
+            "type": "json",
+            "value": [
+              {
+                "name": "Re-verify current macstalker_gui.py state and conventions",
+                "completed": true
+              },
+              {
+                "name": "Add one-shot portal URL check (button, thread, result label) to GUI",
+                "completed": true
+              },
+              {
+                "name": "Headless-test check: 200, 404, redirect, refused, invalid URL, timeout handling",
+                "completed": true
+              },
+              {
+                "name": "Present patch, run/test instructions, assumptions (German)",
+                "completed": true
+              },
+              {
+                "name": "Store memory of URL-check integration",
+                "completed": true
+              }
+            ]
+          }
+        }
+      ],
+      "id": "1fa144f0-edc9-4cd7-bbf9-3336d83b0b11",
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637119877
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "reasoning",
+          "text": "All done. Next, the final response in German: summary, patches (git diff is already available — present the changes as a patch), execution/test instructions, assumptions, and a clear statement that this feature only checks the entered URL and that permissions are required.\n"
+        },
+        {
+          "type": "text",
+          "text": "## Zusammenfassung\n\nDie GUI (`macstalker_gui.py`, Tkinter) liegt unter `/home/admin/Dokumente/git-jan/macstalkergui/macstalker/`. Ich habe **eine Datei** geändert (`macstalker_gui.py`, +76 Zeilen, keine andere Datei betroffen): Eine neue Zeile „Check portal URL\" mit Button und Ergebnis-Label prüft die im bestehenden „Portal URL\"-Feld eingegebene URL (z. B. `http://line.tvdsz.cc/c`) per **einzigem, normalem GET-Request** in einem Hintergrund-Thread. Das Ergebnis (erreichbar/HTTP-Status/Antwortzeit bzw. Redirect-Ziel bzw. Fehler) erscheint im Label und im Log — die UI friert nicht ein (gleines Thread-/Queue-/`after(100)`-Schema wie beim Scan). Es wird nur die exakt eingegebene URL mit einer einzigen Anfrage geprüft: kein Crawling, keine Weg-Erfassung, keine Wiederholungen, keine Credentials — also eine reine Erreichbarkeitsprüfung, **keine Sicherheitsanalyse**. Die Ziel-URL darf nur getestet werden, wenn Sie dafür berechtigt sind.\n\n## Geänderte Datei: `macstalker_gui.py` (Patch)\n\n```diff\n--- a/macstalker_gui.py\n+++ b/macstalker_gui.py\n@@ -4,6 +4,8 @@\n The GUI does not reimplement the scanner: it runs macstalker.sh as a\n subprocess, answers its two stdin prompts (max MACs, workers), and displays\n the scanner's event lines (PROGRESS| / FOUND| / SUMMARY|) in a log.\n+It also offers a one-shot portal URL check (a single plain GET to the exact\n+entered URL — availability only, no crawling or repeated requests).\n@@ -18,14 +20,22 @@ import os\n import queue\n import re\n import signal\n+import socket\n import subprocess\n import threading\n+import time\n import tkinter as tk\n import tkinter.ttk as ttk\n+import urllib.error\n+import urllib.parse\n+import urllib.request\n from tkinter import filedialog\n \n SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), \"macstalker.sh\")\n \n+# One-shot portal URL check: a single plain GET with this timeout (no retries).\n+CHECK_TIMEOUT = 5\n+\n ANSI_RE = re.compile(r\"\\x1b\\[[0-9;]*[A-Za-z]\")\n@@ -40,6 +50,7 @@ class MacstalkerApp:\n         self.proc = None\n         self.proxy_file = None\n         self.scanning = False\n+        self.checking = False\n         self.mac_count = 0\n@@ -89,6 +100,16 @@ class MacstalkerApp:\n         self.workers_entry.pack(side=\"left\", padx=6)\n \n+        # Row 2b: one-shot check of the portal URL (single GET, no scan)\n+        check_row = ttk.Frame(self.root)\n+        check_row.pack(fill=\"x\")\n+        check_row.pack_configure(**pad)\n+        self.check_button = ttk.Button(check_row, text=\"Check portal URL\",\n+                                        command=self.on_check_url)\n+        self.check_button.pack(side=\"left\")\n+        self.check_label = ttk.Label(check_row, text=\"(not checked yet)\", foreground=\"#555\")\n+        self.check_label.pack(side=\"left\", padx=(12, 0))\n+\n         # Row 3: Start / Stop\n@@ -286,6 +307,51 @@ class MacstalkerApp:\n             else:\n                 self._kill_proc()\n \n+    # ---------- portal URL check ----------\n+\n+    def on_check_url(self):\n+        # Validates the URL and starts ONE low-impact GET to the exact URL\n+        # in the \"Portal URL\" field (no crawl, no retries, no credentials)\n+        # in a background thread so the window stays responsive.\n+        if self.checking:\n+            return\n+        url = self.url_entry.get().strip()\n+        try:\n+            parts = urllib.parse.urlsplit(url)\n+        except ValueError:\n+            parts = None\n+        if parts is None or parts.scheme not in (\"http\", \"https\") or not parts.netloc:\n+            self.log_line(\"Enter a valid portal URL, e.g. http://example.com:8080\", \"error\")\n+            return\n+        self.checking = True\n+        self.check_button.config(state=\"disabled\")\n+        self.check_label.config(text=\"checking…\", foreground=\"#555\")\n+        self.log_line(f\"Checking URL: {url} (one request, {CHECK_TIMEOUT} s timeout)…\", \"info\")\n+        threading.Thread(target=self._url_check_worker, args=(url,), daemon=True).start()\n+\n+    def _url_check_worker(self, url):\n+        start = time.monotonic()\n+        ok = False\n+        try:\n+            req = urllib.request.Request(url,\n+                                         headers={\"User-Agent\": \"macstalker-gui/1.0\"})\n+            with urllib.request.urlopen(req, timeout=CHECK_TIMEOUT) as resp:\n+                ok = True\n+                text = f\"reachable — HTTP {resp.status} in {time.monotonic() - start:.2f} s\"\n+                if resp.geturl() != url:\n+                    text += f\" (redirected to {resp.geturl()})\"\n+        except urllib.error.HTTPError as exc:\n+            # The server answered; the status code is still a useful result.\n+            text = f\"reachable, but HTTP {exc.code} in {time.monotonic() - start:.2f} s\"\n+        except urllib.error.URLError as exc:\n+            text = (f\"no response within {CHECK_TIMEOUT} s (timeout)\"\n+                    if isinstance(exc.reason, socket.timeout)\n+                    else f\"unreachable ({exc.reason})\")\n+        except Exception as exc:\n+            text = f\"check failed ({exc})\"\n+        if not self._destroyed:\n+            self.queue.put((\"check_done\", (ok, text)))\n+\n     # ---------- main loop plumbing ----------\n@@ -305,11 +371,21 @@ class MacstalkerApp:\n         kind, text = item\n         if kind == \"progress\":\n             self.status_label.config(text=f\"{self.mac_count} found — {text}\")\n+        elif kind == \"check_done\":\n+            self._handle_check_done(text)\n         else:\n             self.log_line(text, kind)\n             if kind == \"found\":\n                 self.status_label.config(text=f\"{self.mac_count} found\")\n \n+    def _handle_check_done(self, result):\n+        ok, message = result\n+        self.checking = False\n+        self.check_button.config(state=\"normal\")\n+        self.check_label.config(text=message, foreground=\"\" if ok else \"#e06c75\")\n+        self.log_line((\"Portal check OK: \" if ok else \"Portal check failed: \") + message,\n+                      \"found\" if ok else \"error\")\n+\n     def _on_scan_done(self, code):\n```\n\n## Verhalten\n\n- **Ergebnis-Format im Label:** z. B. `reachable — HTTP 200 in 0.34 s`, bei Redirect zusätzlich `(redirected to http://...)`, bei Serverantwort mit Fehlerstatus `reachable, but HTTP 404 in ... s`, bei Netzwerkproblemen `unreachable ([Errno 111] Connection refused)` bzw. `no response within 5 s (timeout)`. Fehler rot, Erfolg normal; jeder Vorgang wird auch im Log protokolliert.\n- **Validierung:** nur `http://`/`https://` mit Host (via `urllib.parse.urlsplit`, inkl. Port-Validierung); leer/ungültig → Fehlermeldung, kein Request.\n- **UI bleibt responsiv:** Request läuft in einem Daemon-Thread; Ergebnis kommt über die bestehende `queue.Queue` → `poll_queue`-Schleife in die UI. Button wird während des Checks deaktiviert (kein Doppelklick = keine zweiten Request).\n- **Keine neuen Abhängigkeiten:** nur Python-Standardbibliothek (`urllib`, `socket`, `time`) — auf Fedora keine zusätzliche Installation nötig.\n\n## Ausgeführte Tests (headless auf Display `:0`)\n\nGegen einen lokalen HTTP-Server getestet und erfolgreich: HTTP 200, Redirect 302 (Ziel wird angezeigt), HTTP 404, Connection refused, ungültige Eingaben (`\"not a url\"`, leer, `http://`, `ftp://x.com` → kein Request). Der Test fand auch einen echten Bug (falsche `headers=`-Parameter bei `urlopen`), der behoben und nachgetestet wurde. `py_compile` läuft fehlerfrei. **Nicht getestet:** ein Check gegen eine echte externe Portal-URL (z. B. `http://line.tvdsz.cc/c`) — dazu bitte einmal live klicken; dort zählt auch der reale Netzwerkpfad (DNS, Firewall).\n\n## Annahmen\n\n- Die Prüfung ist eine bewusst einfache Verfügbarkeitsprüfung der exakt eingegebenen URL (eine Anfrage, 5 s Timeout, User-Agent `macstalker-gui/1.0`, kein Cookie, keine Credentials) — kein Proxy-Check, keine Sicherheitsanalyse.\n- Redirects werden vom Standard-`urllib`-Verhalten aus normal folgen (maximal wie beim Browser üblich); das finale Ziel wird angezeigt.\n- Bei einem HTTPS-Ziel ohne gültiges Zertifikat wird (wie üblich für Python) ein Zertifikatsfehler gemeldet — die URL wäre dann „nicht prüfbar\", nicht „defekt\".\n- Das Portal darf für diese Testanfrage erreichbar sein; es wird davon ausgegangen, dass Sie berechtigt sind, es zu testen.\n\n## Ausführung\n\n```bash\ncd macstalkergui/macstalker\npython3 macstalker_gui.py\n```\nDann: Portal-URL (z. B. `http://line.tvdsz.cc/c`) in das „Portal URL\"-Feld eingeben → „Check portal URL\". Der Scan-Workflow bleibt unverändert."
+        }
+      ],
+      "id": "42b885b1-ad8a-47ae-b8b6-c64b5dfe6585",
+      "usageReport": {
+        "model": "openai-compatible//home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
+        "sentTokens": 121,
+        "receivedTokens": 2334,
+        "cacheReadTokens": 46946,
+        "cacheWriteTokens": 0,
+        "messageCost": 0,
+        "agentTotalCost": 0
+      },
+      "promptContext": {
+        "id": "05506f0f-1ea4-4f55-84ae-70d48cc6293c"
+      },
+      "timestamp": 1792637202068
     }
   ],
   "contextFiles": []

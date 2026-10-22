@@ -1,6 +1,6 @@
 {
   "id": "6da810f5",
-  "baseDir": "/home/admin/Dokumente/git-jan/macstalkergui/macstalker",
+  "baseDir": "/home/admin/Downloads/macstalkergui/macstalker",
   "name": "Add Tkinter GUI wrapper to existing proxy scanner",
   "archived": false,
   "aiderTotalCost": 0,
@@ -17,9 +17,10 @@
   "model": "/home/admin/Dokumente/GGUF/Qwen3.8-27B-Uncensored-IQ3_XXS.gguf",
   "workingMode": "local",
   "autonomyMode": "autonomous",
-  "updatedAt": "2026-10-22T00:48:51.161Z",
+  "updatedAt": "2026-10-22T02:46:52.897Z",
   "createdAt": "2026-10-22T00:11:33.092Z",
-  "startedAt": "2026-10-22T00:11:33.093Z",
+  "startedAt": "2026-10-22T02:36:35.723Z",
   "state": "READY_FOR_REVIEW",
-  "completedAt": "2026-10-22T00:48:51.161Z"
+  "completedAt": "2026-10-22T02:46:52.897Z",
+  "contextCompactingThresholdTokens": 65536
 }

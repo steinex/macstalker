@@ -67,3 +67,24 @@
 +4. A short note on assumptions and testing performed or still needed.
 +
 +If the source is unavailable, respond only with a concise request for the program or project files needed to build the GUI; do not provide fabricated code.
+
+# 2026-10-22T02:36:11.383Z
++Modify the GUI in the code or project files provided in this conversation so a user can easily check a portal URL such as `http://line.tvdsz.cc/c`.
++
++Instructions:
++- First inspect the available project files and identify the GUI framework, existing structure, and conventions. Preserve the current framework, design, and unrelated behavior wherever practical.
++- Add a straightforward interface for entering one portal URL and starting a check. Show a clear result, such as reachable/unreachable, HTTP status code when available, response time, and any redirect destination. Include understandable error messages and prevent the interface from freezing while the request runs.
++- Treat this as a basic availability check of the exact URL entered by the user—not a vulnerability assessment or a broad scan. Make only a normal, low-impact request to that URL. Do not crawl links, enumerate paths, guess credentials, bypass authentication, evade restrictions, or send repeated/high-volume requests. Do not submit credentials or sensitive data.
++- Validate the URL and handle timeouts, DNS/network errors, invalid input, and unexpected responses gracefully. Keep any timeout and request behavior conservative, and explain relevant assumptions.
++- Make the smallest complete change that fits the existing application. Do not replace the project with an unrelated demo or invent files, APIs, or dependencies that are not needed.
++
++Verification:
++- Review the changes for compatibility with the existing project and likely runtime errors.
++- If the environment allows, run relevant tests or a build and report the results honestly. Do not claim that code was tested if it was not.
++
++Response requirements:
++- Respond in German.
++- If project code is available, provide the implementation as a concise patch or the complete contents of each changed file, with filenames. Include any necessary run or test instructions.
++- If no source code or project files are available in the conversation, do not fabricate a rewrite. Briefly ask the user to provide the relevant GUI source files and identify the language or framework if it is not apparent.
++- State clearly that the feature checks only the user-entered URL and requires authorization to test the target.
++
